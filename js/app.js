@@ -526,7 +526,7 @@ function initRelay() {
       return;
     }
 
-    const cluster = (typeof PIESOCKET_CLUSTER_ID !== 'undefined' ? PIESOCKET_CLUSTER_ID : "free.blr1");
+    const cluster = (typeof PIESOCKET_CLUSTER_ID !== 'undefined' ? PIESOCKET_CLUSTER_ID : "free.blr2");
 
     const piesocket = new PS({
       clusterId: cluster,
