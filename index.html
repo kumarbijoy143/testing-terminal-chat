@@ -37,7 +37,7 @@
       </button>
 
       <!-- PUBG Style Live Mic Push/Toggle -->
-      <button class="action-btn" id="mic-toggle-btn" title="Mic On/Off" onclick="toggleMic()">
+      <button class="action-btn" id="mic-toggle-btn" title="Mic Push-to-Talk" onpointerdown="startPTT(event)" onpointerup="stopPTT(event)" onpointerleave="stopPTT(event)">
         <svg viewBox="0 0 24 24">
           <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
           <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
@@ -47,7 +47,7 @@
       </button>
 
       <!-- Video Call Screen Hand-off -->
-      <button class="action-btn" title="Video Call" onclick="triggerCallHandOff(true)">
+      <button class="action-btn" title="Video Call" onclick="initiateCall(true)">
         <svg viewBox="0 0 24 24">
           <rect x="2" y="5" width="13" height="14" rx="3"></rect>
           <path d="M15 10l5-3v10l-5-3"></path>
@@ -55,7 +55,7 @@
       </button>
 
       <!-- Voice Call Screen Hand-off -->
-      <button class="action-btn" title="Voice Call" onclick="triggerCallHandOff(false)">
+      <button class="action-btn" title="Voice Call" onclick="initiateCall(false)">
         <svg viewBox="0 0 24 24">
           <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"></path>
         </svg>
@@ -91,7 +91,7 @@
       <span class="reaction-emoji" onclick="selectReaction('🙏')">🙏</span>
     </div>
 
-    <!-- WhatsApp Context Action Dropdown Menu -->
+    <!-- Context Action Dropdown Menu -->
     <div id="msg-context-menu">
       <div class="context-item" onclick="triggerContextAction('reply')">
         <span>↩️</span><span>Reply</span>
@@ -126,7 +126,8 @@
   <!-- Expanding Bottom Input Bar -->
   <footer id="input-bar">
     <div class="input-pill">
-      <button class="smiley-btn" type="button" onclick="triggerNativeEmojiKeyboard()">
+      <!-- Fixed Smiley Button -->
+      <button class="smiley-btn" type="button" onclick="toggleEmojiTray()">
         <svg viewBox="0 0 24 24">
           <circle cx="12" cy="12" r="10"></circle>
           <path d="M8 14s1.5 2 4 2 4-2 4-2"></path>
@@ -148,6 +149,38 @@
       </svg>
     </button>
   </footer>
+
+  <!-- Instant In-App Emoji Tray -->
+  <div id="emoji-tray" class="emoji-tray-hidden">
+    <div class="emoji-grid">
+      <span onclick="insertEmoji('😀')">😀</span><span onclick="insertEmoji('😂')">😂</span>
+      <span onclick="insertEmoji('😍')">😍</span><span onclick="insertEmoji('😎')">😎</span>
+      <span onclick="insertEmoji('🔥')">🔥</span><span onclick="insertEmoji('👍')">👍</span>
+      <span onclick="insertEmoji('🙏')">🙏</span><span onclick="insertEmoji('🎉')">🎉</span>
+      <span onclick="insertEmoji('💯')">💯</span><span onclick="insertEmoji('🚀')">🚀</span>
+      <span onclick="insertEmoji('⚡')">⚡</span><span onclick="insertEmoji('🔒')">🔒</span>
+      <span onclick="insertEmoji('💀')">💀</span><span onclick="insertEmoji('🤫')">🤫</span>
+      <span onclick="insertEmoji('👀')">👀</span><span onclick="insertEmoji('❤️')">❤️</span>
+    </div>
+  </div>
+</div>
+
+<!-- WebRTC Call Stage Overlay -->
+<div id="call-modal" class="call-modal-hidden">
+  <div class="call-header">
+    <div id="call-status">Connecting Secure P2P Call...</div>
+  </div>
+  <div class="video-stage">
+    <video id="remote-video" autoplay playsinline></video>
+    <video id="local-video" autoplay playsinline muted></video>
+  </div>
+  <div class="call-controls">
+    <button class="call-end-btn" onclick="endCall()">
+      <svg viewBox="0 0 24 24" width="28" height="28" fill="#fff">
+        <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.996.996 0 0 1 0-1.41C3.28 8.78 7.42 7 12 7s8.72 1.78 11.71 4.67c.39.39.39 1.02 0 1.41l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28-.79-.74-1.69-1.36-2.67-1.85-.33-.16-.56-.5-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/>
+      </svg>
+    </button>
+  </div>
 </div>
 
 <!-- Native Settings Screen -->
