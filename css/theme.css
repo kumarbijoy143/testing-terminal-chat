@@ -1,76 +1,13 @@
 :root {
-  /* Default Stealth Emerald Theme */
-  --bg-main: #0b0f12;
-  --bg-surface: #141a1f;
-  --bg-card: #1c242b;
-  --border-color: #26333d;
-  
-  --primary-accent: #10b981;
-  --primary-accent-dim: #065f46;
-  --primary-glow: rgba(16, 185, 129, 0.2);
-  
-  --text-main: #f3f4f6;
-  --text-dim: #9ca3af;
-  --text-muted: #6b7280;
-  
-  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --chat-font-size: 15px;
-
-  /* Google Pay Bubble Surface Variables */
-  --gpay-out-bg: #133929;
-  --gpay-out-border: #1d533c;
-  --gpay-out-text: #d1fae5;
-  
-  --gpay-in-bg: #1c2228;
-  --gpay-in-border: #2d3741;
-  --gpay-in-text: #f3f4f6;
-}
-
-/* Theme Presets */
-body[data-theme="cyberpunk"] {
-  --bg-main: #0a0612;
-  --bg-surface: #150d24;
-  --bg-card: #201438;
-  --border-color: #3b1d6e;
-  --primary-accent: #f43f5e;
-  --primary-accent-dim: #881337;
-  --primary-glow: rgba(244, 63, 94, 0.25);
-  --gpay-out-bg: #3f1025;
-  --gpay-out-border: #5f1837;
-  --gpay-out-text: #ffe4e6;
-  --gpay-in-bg: #1e1333;
-  --gpay-in-border: #351c5e;
-  --gpay-in-text: #fdf2f8;
-}
-
-body[data-theme="matrix"] {
-  --bg-main: #000000;
-  --bg-surface: #0a110a;
-  --bg-card: #0f1c0f;
-  --border-color: #1a3a1a;
-  --primary-accent: #22c55e;
-  --primary-accent-dim: #14532d;
-  --primary-glow: rgba(34, 197, 94, 0.3);
-  --gpay-out-bg: #0d2912;
-  --gpay-out-border: #164e23;
-  --gpay-out-text: #dcfce7;
-  --gpay-in-bg: #0f1a0f;
-  --gpay-in-border: #1b381b;
-  --gpay-in-text: #f0fdf4;
-}
-
-body[data-theme="nordic"] {
-  --bg-main: #0f172a;
-  --bg-surface: #1e293b;
-  --bg-card: #334155;
-  --border-color: #475569;
-  --primary-accent: #38bdf8;
-  --primary-accent-dim: #0369a1;
-  --primary-glow: rgba(56, 189, 248, 0.2);
-  --gpay-out-bg: #0c334d;
-  --gpay-out-border: #154c70;
-  --gpay-out-text: #e0f2fe;
-  --gpay-in-bg: #1e293b;
-  --gpay-in-border: #334155;
-  --gpay-in-text: #f8fafc;
+  /* Dynamic App Custom Properties */
+  --bg: #090a0f;
+  --panel-bg: #0e1015;
+  --card-bg: #161922;
+  --card-border: #212631;
+  --dialog-bg: #1c202a;
+  --you-bubble: #005c4b;
+  --peer-bubble: #1a222d;
+  --accent: #00a884;
+  --font-stack: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans Devanagari", "Devanagari MT", Helvetica, Arial, sans-serif;
+  --font-size: 15px;
 }
