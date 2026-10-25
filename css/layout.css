@@ -9,10 +9,10 @@ body, html {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background-color: var(--bg-main);
-  color: var(--text-main);
-  font-family: var(--font-family);
-  font-size: var(--chat-font-size);
+  background-color: var(--bg);
+  color: #f3f4f6;
+  font-family: var(--font-stack);
+  font-size: var(--font-size);
 }
 
 #app-container {
@@ -26,8 +26,8 @@ body, html {
 /* Header */
 header {
   height: 60px;
-  background: var(--bg-surface);
-  border-bottom: 1px solid var(--border-color);
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--card-border);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -53,14 +53,18 @@ header {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #ef4444;
-  box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
+  background: #f59e0b;
   transition: all 0.3s ease;
 }
 
 .status-dot.online {
-  background: var(--primary-accent);
-  box-shadow: 0 0 10px var(--primary-accent);
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent);
+}
+
+.status-dot.offline {
+  background: #ef4444;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
 }
 
 .header-title {
@@ -71,14 +75,14 @@ header {
 
 .header-sub {
   font-size: 10px;
-  color: var(--text-dim);
+  color: #9ca3af;
   font-family: monospace;
 }
 
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
 }
 
 .action-btn {
@@ -91,13 +95,22 @@ header {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  color: var(--text-dim);
+  color: #9ca3af;
   transition: background 0.15s, color 0.15s;
 }
 
 .action-btn:active {
-  background: var(--bg-card);
-  color: var(--primary-accent);
+  background: var(--card-bg);
+  color: var(--accent);
+}
+
+.action-btn.mic-active {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.15);
+}
+
+.action-btn.speaker-muted {
+  opacity: 0.5;
 }
 
 .action-btn svg {
@@ -108,31 +121,34 @@ header {
   fill: none;
 }
 
-/* 120 FPS Chat Stream with Google Pay Capsules */
+/* Chat Stream */
 #chat-stream {
   flex: 1;
   overflow-y: auto;
   padding: 14px 12px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   -webkit-overflow-scrolling: touch;
   scroll-behavior: smooth;
   contain: layout;
 }
 
-.msg-bubble-wrap {
+/* 120 FPS Fluid Hardware-Accelerated Entry */
+.msg-wrap {
   display: flex;
   width: 100%;
-  contain: layout style;
-  animation: gpaySpringEntry 0.28s cubic-bezier(0.175, 0.885, 0.32, 1.15) forwards;
+  margin-bottom: 4px;
   will-change: transform, opacity;
+  animation: gpayEntry 0.22s cubic-bezier(0.18, 0.89, 0.32, 1.15) forwards;
+  position: relative;
+  transition: transform 0.1s ease-out;
 }
 
-@keyframes gpaySpringEntry {
+@keyframes gpayEntry {
   0% {
     opacity: 0;
-    transform: translate3d(0, 14px, 0) scale(0.97);
+    transform: translate3d(0, 10px, 0) scale(0.97);
   }
   100% {
     opacity: 1;
@@ -140,66 +156,144 @@ header {
   }
 }
 
-.msg-bubble-wrap.outgoing {
+.msg-wrap.you {
   justify-content: flex-end;
 }
 
-.msg-bubble-wrap.incoming {
+.msg-wrap.peer {
   justify-content: flex-start;
 }
 
-/* Google Pay Pill Card Structure */
-.gpay-card {
+/* Google Pay Rounded Pill Capsule Bubble */
+.msg-wrap .bubble {
   max-width: 82%;
-  padding: 10px 16px;
-  border-radius: 22px;
+  padding: 9px 15px;
+  border-radius: 20px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
   position: relative;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
-  line-height: 1.45;
   word-break: break-word;
-  user-select: none;
+  line-height: 1.45;
 }
 
-.outgoing .gpay-card {
-  background: var(--gpay-out-bg);
-  color: var(--gpay-out-text);
-  border: 1px solid var(--gpay-out-border);
+.msg-wrap.you .bubble {
+  background: var(--you-bubble);
   border-bottom-right-radius: 4px;
+  color: #fff;
 }
 
-.incoming .gpay-card {
-  background: var(--gpay-in-bg);
-  color: var(--gpay-in-text);
-  border: 1px solid var(--gpay-in-border);
+.msg-wrap.peer .bubble {
+  background: var(--peer-bubble);
   border-bottom-left-radius: 4px;
+  color: #f3f4f6;
 }
 
-.gpay-meta {
+.msg-wrap .bubble::after,
+.msg-wrap .bubble::before {
+  display: none !important;
+}
+
+/* Swipe to Reply Icon */
+.swipe-reply-icon {
+  position: absolute;
+  left: -30px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  opacity: 0;
+  fill: var(--accent);
+}
+
+/* Meta Data (Timestamp & Ticks) */
+.msg-meta {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 4px;
-  font-size: 10.5px;
-  margin-top: 4px;
+  font-size: 10px;
+  margin-top: 3px;
   opacity: 0.65;
   font-family: monospace;
 }
 
-/* Reply Preview inside Bubble */
-.quoted-box {
+.ticks.seen {
+  color: #38bdf8;
+}
+
+.edited-badge {
+  font-size: 9px;
+  opacity: 0.7;
+  font-style: italic;
+  margin-right: 4px;
+}
+
+.burn-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: #f59e0b;
+}
+
+.burn-badge svg {
+  width: 10px;
+  height: 10px;
+  stroke: currentColor;
+  stroke-width: 2;
+  fill: none;
+}
+
+.bubble-reaction {
+  display: none;
+  position: absolute;
+  bottom: -10px;
+  right: 12px;
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 1px 5px;
+  font-size: 13px;
+}
+
+/* Quoted Reply Box */
+.quoted-card {
   background: rgba(0, 0, 0, 0.25);
-  border-left: 3px solid var(--primary-accent);
-  padding: 5px 8px;
-  border-radius: 6px;
+  border-left: 3px solid var(--accent);
+  padding: 4px 8px;
+  border-radius: 4px;
   font-size: 12px;
   margin-bottom: 6px;
+}
+
+/* Media preview */
+.media-preview {
+  max-width: 100%;
+  border-radius: 8px;
+  margin-bottom: 6px;
+}
+
+.file-card {
+  display: inline-block;
+  color: var(--accent);
+  text-decoration: underline;
+  padding: 4px 0;
+}
+
+/* System Log */
+.sys-log {
+  align-self: center;
+  background: rgba(0,0,0,0.3);
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-family: monospace;
+  color: #9ca3af;
 }
 
 /* Docked Reply/Edit Preview Bar */
 #reply-preview-bar {
   display: none;
-  background: var(--bg-surface);
-  border-top: 1px solid var(--border-color);
+  background: var(--panel-bg);
+  border-top: 1px solid var(--card-border);
   padding: 8px 14px;
   align-items: center;
   justify-content: space-between;
@@ -215,12 +309,12 @@ header {
 .reply-preview-title {
   font-size: 11px;
   font-weight: 700;
-  color: var(--primary-accent);
+  color: var(--accent);
 }
 
 .reply-preview-text {
   font-size: 13px;
-  color: var(--text-dim);
+  color: #9ca3af;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -229,7 +323,7 @@ header {
 .reply-cancel-btn {
   background: transparent;
   border: none;
-  color: var(--text-dim);
+  color: #9ca3af;
   font-size: 16px;
   cursor: pointer;
 }
@@ -237,8 +331,8 @@ header {
 /* Input Bar */
 #input-bar {
   min-height: 58px;
-  background: var(--bg-surface);
-  border-top: 1px solid var(--border-color);
+  background: var(--panel-bg);
+  border-top: 1px solid var(--card-border);
   display: flex;
   align-items: flex-end;
   gap: 8px;
@@ -248,8 +342,8 @@ header {
 
 .input-pill {
   flex: 1;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
   border-radius: 24px;
   display: flex;
   align-items: center;
@@ -260,7 +354,7 @@ header {
 .smiley-btn, .attach-btn {
   background: transparent;
   border: none;
-  color: var(--text-dim);
+  color: #9ca3af;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -279,11 +373,11 @@ header {
   flex: 1;
   background: transparent;
   border: none;
-  color: var(--text-main);
+  color: #fff;
   outline: none;
   font-size: 14.5px;
   resize: none;
-  max-height: 120px;
+  max-height: 110px;
   padding: 6px 2px;
 }
 
@@ -291,7 +385,7 @@ header {
   width: 44px;
   height: 44px;
   border-radius: 50%;
-  background: var(--primary-accent);
+  background: var(--accent);
   border: none;
   color: #000;
   display: flex;
@@ -306,10 +400,10 @@ header {
   fill: currentColor;
 }
 
-/* In-App Emoji Tray */
+/* Fast In-App Emoji Tray */
 #emoji-tray {
-  background: var(--bg-surface);
-  border-top: 1px solid var(--border-color);
+  background: var(--panel-bg);
+  border-top: 1px solid var(--card-border);
   padding: 12px;
   z-index: 25;
 }
@@ -340,8 +434,8 @@ header {
 #reaction-dock {
   display: none;
   position: absolute;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
   border-radius: 24px;
   padding: 6px 10px;
   gap: 8px;
@@ -359,8 +453,8 @@ header {
 #msg-context-menu {
   display: none;
   position: absolute;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
+  background: var(--dialog-bg);
+  border: 1px solid var(--card-border);
   border-radius: 12px;
   padding: 6px 0;
   width: 140px;
@@ -378,7 +472,7 @@ header {
 }
 
 .context-item:active {
-  background: var(--border-color);
+  background: var(--card-border);
 }
 
 /* Typing Bubble */
@@ -389,9 +483,9 @@ header {
 }
 
 .typing-bubble {
-  background: var(--gpay-in-bg);
-  border: 1px solid var(--gpay-in-border);
-  padding: 10px 14px;
+  background: var(--peer-bubble);
+  border: 1px solid var(--card-border);
+  padding: 8px 14px;
   border-radius: 18px;
   display: flex;
   gap: 4px;
@@ -401,7 +495,7 @@ header {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--text-dim);
+  background: #9ca3af;
   animation: typingBounce 1.2s infinite ease-in-out;
 }
 
@@ -418,23 +512,24 @@ header {
   display: none !important;
 }
 
-#call-modal {
+#call-box {
   position: fixed;
   inset: 0;
   background: #000;
-  z-index: 100;
+  z-index: 9999;
   display: flex;
   flex-direction: column;
 }
 
 .call-header {
-  height: 50px;
+  height: 48px;
   display: flex;
   align-items: center;
   justify-content: center;
   background: rgba(0,0,0,0.7);
   color: #fff;
-  font-size: 13px;
+  font-size: 12px;
+  font-family: monospace;
 }
 
 .video-stage {
@@ -443,20 +538,20 @@ header {
   background: #111;
 }
 
-#remote-video {
+#call-remote-video {
   width: 100%;
   height: 100%;
   object-fit: cover;
 }
 
-#local-video {
+#call-local-video {
   position: absolute;
   top: 14px;
   right: 14px;
   width: 100px;
   height: 145px;
   border-radius: 12px;
-  border: 2px solid var(--primary-accent);
+  border: 2px solid var(--accent);
   object-fit: cover;
   background: #222;
 }
@@ -486,7 +581,7 @@ header {
   display: none;
   position: fixed;
   inset: 0;
-  background: var(--bg-main);
+  background: var(--bg);
   z-index: 90;
   flex-direction: column;
 }
@@ -496,14 +591,14 @@ header {
   display: flex;
   align-items: center;
   padding: 0 14px;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--card-border);
   gap: 12px;
 }
 
 .back-btn {
   background: transparent;
   border: none;
-  color: var(--primary-accent);
+  color: var(--accent);
   font-size: 26px;
   cursor: pointer;
 }
@@ -525,13 +620,13 @@ header {
 .section-label {
   font-size: 11px;
   font-weight: 700;
-  color: var(--text-dim);
+  color: #9ca3af;
   letter-spacing: 0.5px;
 }
 
 .os-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
   border-radius: 14px;
   overflow: hidden;
 }
@@ -540,7 +635,7 @@ header {
   display: flex;
   align-items: center;
   padding: 14px;
-  border-bottom: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--card-border);
   cursor: pointer;
   gap: 12px;
 }
@@ -549,10 +644,15 @@ header {
   border-bottom: none;
 }
 
+.os-row.disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
 .row-icon-svg {
   width: 20px;
   height: 20px;
-  stroke: var(--text-dim);
+  stroke: #9ca3af;
   stroke-width: 2;
   fill: none;
 }
@@ -567,12 +667,12 @@ header {
 
 .row-subtitle {
   font-size: 11px;
-  color: var(--text-dim);
+  color: #9ca3af;
   margin-top: 2px;
 }
 
 .row-arrow {
-  color: var(--text-dim);
+  color: #9ca3af;
   font-size: 18px;
 }
 
@@ -597,7 +697,7 @@ header {
 }
 
 .toggle-switch.active {
-  background: var(--primary-accent);
+  background: var(--accent);
 }
 
 .toggle-switch.active .toggle-knob {
@@ -621,8 +721,8 @@ header {
 }
 
 .passkey-box, .os-dialog {
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
+  background: var(--dialog-bg);
+  border: 1px solid var(--card-border);
   border-radius: 16px;
   width: 100%;
   max-width: 320px;
@@ -633,9 +733,9 @@ header {
 }
 
 .passkey-input {
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  color: var(--text-main);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  color: #fff;
   border-radius: 8px;
   text-align: center;
   padding: 10px;
@@ -645,7 +745,7 @@ header {
 }
 
 .passkey-btn, .dialog-cancel-btn {
-  background: var(--primary-accent);
+  background: var(--accent);
   color: #000;
   font-weight: 700;
   padding: 10px;
@@ -655,6 +755,45 @@ header {
 }
 
 .dialog-cancel-btn {
-  background: var(--border-color);
-  color: var(--text-main);
+  background: var(--card-border);
+  color: #fff;
+}
+
+.dialog-option {
+  display: flex;
+  align-items: center;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--card-border);
+  cursor: pointer;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.dialog-option:last-child {
+  border-bottom: none;
+}
+
+.os-radio {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid #9ca3af;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.os-radio.selected {
+  border-color: var(--accent);
+}
+
+.os-radio-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.os-radio.selected .os-radio-dot {
+  background: var(--accent);
 }
