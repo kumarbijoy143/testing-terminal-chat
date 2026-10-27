@@ -1,29 +1,36 @@
-let passkey = "";
-
-// 1. DETERMINISTIC IDENTITY: Session-persistent ID prevents Sender/Receiver swapping
-let clientId = sessionStorage.getItem("term_client_id");
-if (!clientId) {
-  clientId = "dev_" + Math.random().toString(36).substr(2, 7);
-  sessionStorage.setItem("term_client_id", clientId);
+// =====================================================================
+// TERMINAL CONSOLE - TEST VERSION
+// =====================================================================
+function uid() {
+  const a = new Uint8Array(6);
+  crypto.getRandomValues(a);
+  return Array.from(a, b => b.toString(16).padStart(2, "0")).join("");
 }
+const $ = (id) => document.getElementById(id);
 
+let passkey = "";
+// Permanent device id: the same on every launch, so you never get your own messages back.
+const clientId = (() => {
+  let id = lsGet("device_id");
+  if (!id) { id = "d_" + uid(); lsSet("device_id", id); }
+  return id;
+})();
 let channel = null;
 
-// Exact saved preferences
-let disappearingEnabled = localStorage.getItem("term_disappearing") !== null
-  ? localStorage.getItem("term_disappearing") === "true"
-  : true;
+const _d = lsGet("disappearing");
+let disappearingEnabled = _d === "" ? true : _d === "true";
+let burnDuration = parseInt(lsGet("burn_duration", "10"), 10) || 10;
+let currentTheme = lsGet("theme", "stealth");
+let currentFont = lsGet("font", "sans");
+let currentFontSize = lsGet("font_size", "15");
 
-let burnDuration = localStorage.getItem("term_burn_duration") !== null
-  ? parseInt(localStorage.getItem("term_burn_duration"), 10)
-  : 10;
-
-let currentTheme = localStorage.getItem("term_theme") || "stealth";
-let currentFont = localStorage.getItem("term_font") || "sans";
-let currentFontSize = localStorage.getItem("term_font_size") || "15";
-
-let outbox = [];
-let isFlushing = false;
+let outbox = [];                 // only used when no vault is configured
+const pending = new Map();       // sent but not yet delivered: msgId -> sent time
+const seenIds = new Set();       // every message already shown (stops duplicates)
+const unread = new Set();        // peer messages that arrived while app was in background
+let appActive = document.visibilityState === "visible";
+let syncing = false;
+let pingTimer = null;
 
 let peerOnline = false;
 let peerWatchdogTimer = null;
@@ -35,28 +42,87 @@ let activeQuotedTarget = null;
 let editingTargetMsgId = null;
 let activeContextTarget = null;
 
-// Audio & WebRTC State
-let rtcPeer = null;
-let localAudioStream = null;
-let isMicActive = false;
-let isSpeakerMuted = false;
-const remoteAudioEl = new Audio();
-remoteAudioEl.autoplay = true;
+const stream = $("chat-stream");
+const msgInput = $("msg-input");
+const connState = $("conn-state");
+const statusDot = $("status-dot");
+const typingIndicator = $("typing-indicator");
 
-// WebRTC Call State
-let callPeer = null;
-let callMediaStream = null;
+// =====================================================================
+// CUSTOM DIALOGS (replace the browser's alert / confirm / prompt)
+// =====================================================================
+function uiDialog(o) {
+  return new Promise(res => {
+    const ov = document.createElement("div");
+    ov.className = "os-modal-overlay ui-modal";
+    ov.style.display = "flex";
+    const box = document.createElement("div");
+    box.className = "os-dialog";
 
-const RTC_CONFIG = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-};
+    const h = document.createElement("div");
+    h.className = "dialog-header";
+    h.textContent = o.title;
+    box.appendChild(h);
 
-const stream = document.getElementById("chat-stream");
-const msgInput = document.getElementById("msg-input");
-const connState = document.getElementById("conn-state");
-const statusDot = document.getElementById("status-dot");
-const typingIndicator = document.getElementById("typing-indicator");
+    if (o.text) {
+      const p = document.createElement("div");
+      p.className = "dialog-text";
+      p.textContent = o.text;
+      box.appendChild(p);
+    }
 
+    const inputs = {};
+    (o.fields || []).forEach(f => {
+      const i = document.createElement("input");
+      i.className = "dialog-input";
+      i.type = f.type || "text";
+      i.placeholder = f.placeholder || "";
+      i.value = f.value || "";
+      i.autocomplete = "off";
+      i.spellcheck = false;
+      box.appendChild(i);
+      inputs[f.id] = i;
+    });
+
+    const row = document.createElement("div");
+    row.className = "dialog-actions";
+    const done = (v) => { ov.remove(); res(v); };
+
+    if (!o.hideCancel) {
+      const c = document.createElement("button");
+      c.className = "dialog-btn";
+      c.textContent = o.cancel || "Cancel";
+      c.onclick = () => done(o.fields ? null : false);
+      row.appendChild(c);
+    }
+    const k = document.createElement("button");
+    k.className = "dialog-btn " + (o.danger ? "danger" : "primary");
+    k.textContent = o.ok || "OK";
+    k.onclick = () => {
+      if (o.fields && o.fields.length) {
+        const v = {};
+        for (const id in inputs) v[id] = inputs[id].value;
+        done(v);
+      } else {
+        done(true);
+      }
+    };
+    row.appendChild(k);
+    box.appendChild(row);
+    ov.appendChild(box);
+    document.body.appendChild(ov);
+
+    const first = Object.values(inputs)[0];
+    if (first) setTimeout(() => first.focus(), 80);
+  });
+}
+const uiAlert = (title, text) => uiDialog({ title, text, hideCancel: true });
+const uiConfirm = (title, text, ok, danger) => uiDialog({ title, text, ok, danger });
+const uiForm = (o) => uiDialog(o);
+
+// =====================================================================
+// BASIC UI
+// =====================================================================
 function scrollToBottom(targetNode) {
   requestAnimationFrame(() => {
     if (targetNode && targetNode.scrollIntoView) {
@@ -64,488 +130,189 @@ function scrollToBottom(targetNode) {
     } else {
       stream.scrollTop = stream.scrollHeight;
     }
-    setTimeout(() => {
-      stream.scrollTop = stream.scrollHeight;
-    }, 120);
+    setTimeout(() => { stream.scrollTop = stream.scrollHeight; }, 120);
   });
 }
 
 function resizeInputBox() {
   msgInput.style.height = "auto";
-  const newHeight = Math.min(msgInput.scrollHeight, 110);
-  msgInput.style.height = newHeight + "px";
+  msgInput.style.height = Math.min(msgInput.scrollHeight, 110) + "px";
 }
 
 msgInput.addEventListener("input", () => {
   resizeInputBox();
-
   if (!channel || !passkey) return;
-
   const now = Date.now();
   if (now - lastTypingBroadcast > 3000) {
     lastTypingBroadcast = now;
     dispatchRaw({ type: "typing", status: true, senderId: clientId });
   }
-
   clearTimeout(localTypingTimeout);
   localTypingTimeout = setTimeout(() => {
     dispatchRaw({ type: "typing", status: false, senderId: clientId });
   }, 2500);
 });
 
+msgInput.addEventListener("focus", () => scrollToBottom());
+msgInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+$("numeric-key").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") mountSession();
+});
+
+function triggerNativeEmojiKeyboard() { msgInput.focus(); }
+
+// ---- App visibility: decides when a message counts as "read" ----
+function setActive(v) {
+  if (appActive === v) return;
+  appActive = v;
+  if (v) {
+    flushUnread();
+    if (passkey) { pingNow(); syncVault(); }
+  }
+}
+document.addEventListener("visibilitychange", () => setActive(document.visibilityState === "visible"));
+window.addEventListener("focus", () => setActive(true));
+window.addEventListener("blur", () => setActive(false));
+
 window.addEventListener("DOMContentLoaded", () => {
   setTheme(currentTheme);
   setFont(currentFont);
   setFontSize(currentFontSize);
+  injectUi();
   updateDisappearingUI();
   updateSettingsLabels();
 
-  const keyInput = document.getElementById("numeric-key");
-  setTimeout(() => {
-    if (keyInput) {
-      keyInput.focus();
-      keyInput.click();
-    }
-  }, 150);
+  const sub = document.querySelector(".header-sub");
+  if (sub) sub.innerText = "END-TO-END ENCRYPTED";
+
+  // Ask the browser to keep saved settings (key, vault link) permanently.
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+
+  const keyInput = $("numeric-key");
+  setTimeout(() => { if (keyInput) { keyInput.focus(); keyInput.click(); } }, 150);
 });
 
-msgInput.addEventListener("focus", () => {
-  scrollToBottom();
-});
+// Adds the extra settings rows, the call screen and the settings entries.
+function injectUi() {
+  const card = $("current-vault-label").closest(".os-card");
+  const mkRow = (iconPath, title, subId, subText, onclick) => {
+    const row = document.createElement("div");
+    row.className = "os-row";
+    row.onclick = onclick;
+    row.innerHTML = `
+      <svg class="row-icon-svg" viewBox="0 0 24 24">${iconPath}</svg>
+      <div class="row-content">
+        <div class="row-title">${title}</div>
+        <div class="row-subtitle" id="${subId}">${subText}</div>
+      </div>
+      <div class="row-arrow">›</div>`;
+    return row;
+  };
+  card.appendChild(mkRow('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+    "Keep Undelivered Messages", "current-retention-label", "7 days", () => openDialog("retention")));
+  card.appendChild(mkRow('<path d="M5 12h14"/><path d="M12 5l7 7-7 7"/>',
+    "Call Relay (TURN)", "current-turn-label", "Not set (Wi-Fi calls only)", configureTurn));
 
-msgInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    sendMessage();
-  }
-});
-
-document.getElementById("numeric-key").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") mountSession();
-});
-
-// Fast In-App Emoji Drawer
-function toggleEmojiTray() {
-  const tray = document.getElementById("emoji-tray");
-  if (tray) tray.classList.toggle("emoji-tray-hidden");
-}
-
-function insertEmoji(char) {
-  msgInput.value += char;
-  resizeInputBox();
-  msgInput.focus();
-}
-
-function triggerNativeEmojiKeyboard() {
-  toggleEmojiTray();
-}
-
-// -------------------------------------------------------------
-// WEBRTC CALL ENGINE (VOICE & VIDEO)
-// -------------------------------------------------------------
-async function triggerCallHandOff(isVideo) {
-  if (window.AndroidBridge && window.AndroidBridge.openCallScreen) {
-    window.AndroidBridge.openCallScreen(isVideo);
-    return;
-  }
-
-  const modal = document.getElementById("call-box");
-  if (modal) modal.classList.remove("call-modal-hidden");
-
-  try {
-    callMediaStream = await navigator.mediaDevices.getUserMedia({
-      video: isVideo,
-      audio: true
-    });
-    
-    const localVid = document.getElementById("call-local-video");
-    if (localVid) localVid.srcObject = callMediaStream;
-
-    callPeer = new RTCPeerConnection(RTC_CONFIG);
-    callMediaStream.getTracks().forEach(t => callPeer.addTrack(t, callMediaStream));
-
-    callPeer.ontrack = (e) => {
-      const remoteVid = document.getElementById("call-remote-video");
-      if (remoteVid && e.streams[0]) remoteVid.srcObject = e.streams[0];
-    };
-
-    callPeer.onicecandidate = (e) => {
-      if (e.candidate) {
-        dispatchRaw({
-          type: "call-sig",
-          sig: encrypt(JSON.stringify({ ice: e.candidate })),
-          senderId: clientId
-        });
-      }
-    };
-
-    const offer = await callPeer.createOffer();
-    await callPeer.setLocalDescription(offer);
-    dispatchRaw({
-      type: "call-sig",
-      sig: encrypt(JSON.stringify({ sdp: callPeer.localDescription, isVideo })),
-      senderId: clientId
-    });
-  } catch (err) {
-    alert("Camera/Mic access required for calls: " + err.message);
-    hangUpCall();
-  }
-}
-
-async function handleCallPacket(cipherSig) {
-  const raw = decrypt(cipherSig);
-  if (!raw) return;
-  const signal = JSON.parse(raw);
-
-  const modal = document.getElementById("call-box");
-  if (modal) modal.classList.remove("call-modal-hidden");
-
-  if (!callPeer) {
-    callPeer = new RTCPeerConnection(RTC_CONFIG);
-    callPeer.ontrack = (e) => {
-      const remoteVid = document.getElementById("call-remote-video");
-      if (remoteVid && e.streams[0]) remoteVid.srcObject = e.streams[0];
-    };
-    callPeer.onicecandidate = (e) => {
-      if (e.candidate) {
-        dispatchRaw({
-          type: "call-sig",
-          sig: encrypt(JSON.stringify({ ice: e.candidate })),
-          senderId: clientId
-        });
-      }
-    };
-  }
-
-  if (signal.sdp) {
-    await callPeer.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-    if (signal.sdp.type === "offer") {
-      callMediaStream = await navigator.mediaDevices.getUserMedia({
-        video: signal.isVideo,
-        audio: true
-      });
-      const localVid = document.getElementById("call-local-video");
-      if (localVid) localVid.srcObject = callMediaStream;
-      callMediaStream.getTracks().forEach(t => callPeer.addTrack(t, callMediaStream));
-
-      const answer = await callPeer.createAnswer();
-      await callPeer.setLocalDescription(answer);
-      dispatchRaw({
-        type: "call-sig",
-        sig: encrypt(JSON.stringify({ sdp: callPeer.localDescription })),
-        senderId: clientId
-      });
-    }
-  } else if (signal.ice) {
-    try {
-      await callPeer.addIceCandidate(new RTCIceCandidate(signal.ice));
-    } catch (e) {}
-  }
-}
-
-function hangUpCall() {
-  if (callPeer) {
-    callPeer.close();
-    callPeer = null;
-  }
-  if (callMediaStream) {
-    callMediaStream.getTracks().forEach(t => t.stop());
-    callMediaStream = null;
-  }
-  const modal = document.getElementById("call-box");
-  if (modal) modal.classList.add("call-modal-hidden");
+  const cs = document.createElement("div");
+  cs.id = "call-screen";
+  cs.className = "call-screen";
+  cs.innerHTML = `
+    <video id="remote-media" autoplay playsinline></video>
+    <video id="local-media" autoplay playsinline muted></video>
+    <div class="call-info"><div id="call-title"></div><div id="call-sub"></div></div>
+    <div class="call-controls">
+      <button class="call-btn" id="call-mic" onclick="toggleMic()">Mute</button>
+      <button class="call-btn" id="call-cam" onclick="toggleCam()">Camera</button>
+      <button class="call-btn" id="call-spk" onclick="toggleSpeaker()">Speaker</button>
+      <button class="call-btn accept" id="call-accept" onclick="acceptCall()">Accept</button>
+      <button class="call-btn end" id="call-end" onclick="hangUp()">End</button>
+    </div>`;
+  document.body.appendChild(cs);
 }
 
 function panicExit() {
-  if (localAudioStream) {
-    localAudioStream.getTracks().forEach(t => t.stop());
-  }
-  if (callMediaStream) {
-    callMediaStream.getTracks().forEach(t => t.stop());
-  }
+  endCall("CALL ENDED", true);
+  ftCleanup();
   stream.innerHTML = "";
   outbox = [];
+  pending.clear();
   passkey = "";
-  if (window.history.length > 1) {
-    window.history.back();
-  } else {
-    window.location.reload();
-  }
+  if (window.history.length > 1) window.history.back();
+  else window.location.reload();
 }
 
 function mountSession() {
-  const val = document.getElementById("numeric-key").value.trim();
+  const val = $("numeric-key").value.trim();
   if (!val) return;
   passkey = val;
-  document.getElementById("passkey-dialog").style.display = "none";
-
-  setTimeout(() => {
-    msgInput.focus();
-  }, 100);
+  $("passkey-dialog").style.display = "none";
+  setTimeout(() => msgInput.focus(), 100);
 
   initRelay();
-  fetchAndBurnVault();
+  syncVault();
+
+  // One-time setup: ask for the key and vault link only if they have never been saved.
+  if (lsGet("setup_done") !== "1") {
+    (async () => {
+      if (!getStoredApiKey()) await configureRelayKey();
+      if (!getStoredVaultUrl()) await configureVaultUrl();
+      lsSet("setup_done", "1");
+    })();
+  }
 }
 
-// -------------------------------------------------------------
-// GOOGLE APPS SCRIPT ZERO-KNOWLEDGE DEAD-DROP VAULT
-// -------------------------------------------------------------
-function getStoredVaultUrl() {
-  return localStorage.getItem("term_vault_url") || (typeof DEFAULT_VAULT_URL !== 'undefined' ? DEFAULT_VAULT_URL : "");
+// =====================================================================
+// ENCRYPTION + TRANSPORT
+// =====================================================================
+function encrypt(text) {
+  return CryptoJS.AES.encrypt(text, passkey).toString();
 }
-
-function getStoredApiKey() {
-  return localStorage.getItem("term_relay_key") || (typeof DEFAULT_PIESOCKET_KEY !== 'undefined' ? DEFAULT_PIESOCKET_KEY : "");
-}
-
-function getVaultRoomHash() {
-  return "v_" + CryptoJS.SHA256(passkey + "_universal_vault_salt").toString().substr(0, 28);
-}
-
-async function storeInOfflineVault(envelopeObj) {
-  const vaultUrl = getStoredVaultUrl();
-  if (!vaultUrl || !passkey) return;
-
+function decrypt(cipher) {
   try {
-    const cipherEnv = encrypt(JSON.stringify(envelopeObj));
-    await fetch(vaultUrl, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify({
-        action: "store",
-        room: getVaultRoomHash(),
-        envelope: cipherEnv
-      })
-    });
-  } catch (e) {}
-}
-
-async function fetchAndBurnVault() {
-  const vaultUrl = getStoredVaultUrl();
-  if (!vaultUrl || !passkey) return;
-
-  try {
-    const res = await fetch(vaultUrl, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify({
-        action: "fetch_and_burn",
-        room: getVaultRoomHash()
-      })
-    });
-
-    const data = await res.json();
-    if (data && Array.isArray(data.envelopes) && data.envelopes.length > 0) {
-      let count = 0;
-      data.envelopes.forEach(cipherEnv => {
-        const rawJson = decrypt(cipherEnv);
-        if (rawJson) {
-          const pkg = JSON.parse(rawJson);
-          if (pkg.senderId !== clientId && !document.getElementById(pkg.msgId)) {
-            renderBubble(pkg.text, "peer", pkg.msgId, pkg.timestamp, pkg.burn, pkg.reply, pkg.fileData);
-            count++;
-            if (channel) {
-              dispatchRaw({ type: "ack", msgId: pkg.msgId, senderId: clientId });
-            }
-          }
-        }
-      });
-      if (count > 0) {
-        logSys(`SYNCED ${count} OFFLINE MESSAGE(S) & SHREDDED VAULT.`);
-      }
-    }
-  } catch (e) {}
-}
-
-// -------------------------------------------------------------
-// PUBG-STYLE MIC & SPEAKER LIVE WEBRTC AUDIO
-// -------------------------------------------------------------
-async function ensureAudioConnection(isInitiator) {
-  if (!rtcPeer) {
-    rtcPeer = new RTCPeerConnection(RTC_CONFIG);
-
-    rtcPeer.onicecandidate = (e) => {
-      if (e.candidate) {
-        dispatchRaw({
-          type: "rtc-sig",
-          sig: encrypt(JSON.stringify({ ice: e.candidate })),
-          senderId: clientId
-        });
-      }
-    };
-
-    rtcPeer.ontrack = (e) => {
-      if (e.streams && e.streams[0]) {
-        remoteAudioEl.srcObject = e.streams[0];
-        remoteAudioEl.muted = isSpeakerMuted;
-      }
-    };
-  }
-
-  if (isInitiator) {
-    const offer = await rtcPeer.createOffer();
-    await rtcPeer.setLocalDescription(offer);
-    dispatchRaw({
-      type: "rtc-sig",
-      sig: encrypt(JSON.stringify({ sdp: rtcPeer.localDescription })),
-      senderId: clientId
-    });
+    return CryptoJS.AES.decrypt(cipher, passkey).toString(CryptoJS.enc.Utf8);
+  } catch (e) {
+    return null;
   }
 }
-
-async function handleRtcSignal(cipherSig) {
-  const raw = decrypt(cipherSig);
-  if (!raw) return;
-  const signal = JSON.parse(raw);
-
-  await ensureAudioConnection(false);
-
-  if (signal.sdp) {
-    await rtcPeer.setRemoteDescription(new RTCSessionDescription(signal.sdp));
-    if (signal.sdp.type === "offer") {
-      const answer = await rtcPeer.createAnswer();
-      await rtcPeer.setLocalDescription(answer);
-      dispatchRaw({
-        type: "rtc-sig",
-        sig: encrypt(JSON.stringify({ sdp: rtcPeer.localDescription })),
-        senderId: clientId
-      });
-    }
-  } else if (signal.ice) {
-    try {
-      await rtcPeer.addIceCandidate(new RTCIceCandidate(signal.ice));
-    } catch (e) {}
-  }
+function dispatchRaw(dataObj) {
+  if (!channel) return;
+  const jsonStr = JSON.stringify(dataObj);
+  if (typeof channel.publish === "function") channel.publish("message", jsonStr);
+  else if (typeof channel.send === "function") channel.send(jsonStr);
+}
+// Every command is encrypted, so only someone with the passkey can send one.
+function sendCtl(obj) {
+  dispatchRaw({ type: "ctl", c: encrypt(JSON.stringify(obj)), senderId: clientId });
 }
 
-async function toggleMic() {
-  const btn = document.getElementById("mic-toggle-btn");
-  if (!localAudioStream) {
-    try {
-      localAudioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-      await ensureAudioConnection(false);
-      localAudioStream.getTracks().forEach(track => rtcPeer.addTrack(track, localAudioStream));
-      await ensureAudioConnection(true);
-      isMicActive = true;
-    } catch (err) {
-      logSys("MIC ACCESS DENIED OR BLOCKED BY WEBVIEW.");
-      return;
-    }
-  } else {
-    isMicActive = !isMicActive;
-    localAudioStream.getAudioTracks().forEach(t => t.enabled = isMicActive);
-  }
-
-  if (btn) btn.classList.toggle("mic-active", isMicActive);
-}
-
-function toggleSpeaker() {
-  isSpeakerMuted = !isSpeakerMuted;
-  remoteAudioEl.muted = isSpeakerMuted;
-  const btn = document.getElementById("speaker-toggle-btn");
-  if (btn) btn.classList.toggle("speaker-muted", isSpeakerMuted);
-}
-
-// -------------------------------------------------------------
-// IN-MEMORY ENCRYPTED FILE / IMAGE ATTACHMENT
-// -------------------------------------------------------------
-function triggerFileSelect() {
-  document.getElementById("file-picker").click();
-}
-
-function handleFileSelected(event) {
-  const file = event.target.files[0];
-  if (!file || !passkey) return;
-
-  if (file.size > 2.5 * 1024 * 1024) {
-    alert("For instant encrypted RAM transfer, select a file under 2.5 MB.");
-    event.target.value = "";
-    return;
-  }
-
-  const reader = new FileReader();
-  reader.onload = () => {
-    const base64Data = reader.result;
-    const filePayload = {
-      name: file.name,
-      mime: file.type,
-      data: base64Data
-    };
-
-    const msgId = "m_" + Math.random().toString(36).substr(2, 8);
-    const nowTime = getFormattedTime();
-    const activeBurn = disappearingEnabled ? burnDuration : 0;
-
-    renderBubble(file.name, "you", msgId, nowTime, activeBurn, null, filePayload);
-
-    const packet = {
-      msgId: msgId,
-      text: file.name,
-      timestamp: nowTime,
-      burn: activeBurn,
-      reply: null,
-      fileData: filePayload,
-      senderId: clientId
-    };
-
-    dispatchRaw({
-      type: "chat",
-      msgId: msgId,
-      ciphertext: encrypt(JSON.stringify(packet)),
-      isJson: true,
-      senderId: clientId
-    });
-
-    if (!peerOnline) {
-      storeInOfflineVault(packet);
-    }
-  };
-  reader.readAsDataURL(file);
-  event.target.value = "";
-}
-
-// -------------------------------------------------------------
-// PIESOCKET RELAY ENGINE
-// -------------------------------------------------------------
 function initRelay() {
   const apiKey = getStoredApiKey();
-  if (!apiKey || apiKey === "YOUR_PIESOCKET_API_KEY") {
+  if (!apiKey) {
     setPeerStatusUI("KEY REQUIRED", "offline");
-    logSys("SETUP: Configure your Relay Product Key in Settings (Three dots).");
+    logSys("SETUP: Add your Relay Product Key in Settings (three dots).");
     return;
   }
-
   setPeerStatusUI("CONNECTING RELAY...", "connecting");
-
   try {
     const PS = window.PieSocket?.default || window.PieSocket;
-
     if (typeof PS !== "function") {
       setPeerStatusUI("LIB ERROR", "offline");
-      logSys("ERR: PieSocket library failed to resolve.");
+      logSys("ERR: PieSocket library failed to load.");
       return;
     }
-
-    const cluster = (typeof PIESOCKET_CLUSTER_ID !== 'undefined' ? PIESOCKET_CLUSTER_ID : "free.blr2");
-
-    const piesocket = new PS({
-      clusterId: cluster,
-      apiKey: apiKey,
-      notifySelf: false
-    });
-
+    const piesocket = new PS({ clusterId: PIESOCKET_CLUSTER_ID, apiKey: apiKey, notifySelf: false });
     const dynamicChannel = "ch_" + CryptoJS.SHA256(passkey + "_terminal_salt").toString().substr(0, 16);
     const subResult = piesocket.subscribe(dynamicChannel);
-
     if (subResult && typeof subResult.then === "function") {
       subResult.then((ch) => setupChannel(ch)).catch(() => {
         setPeerStatusUI("AUTH FAILED", "offline");
-        logSys("SOCKET ERROR: Invalid Key or Network Reject.");
+        logSys("SOCKET ERROR: invalid key or network rejected.");
       });
     } else {
       setupChannel(subResult);
     }
-
   } catch (e) {
     setPeerStatusUI("INIT ERROR", "offline");
     logSys("ERR: " + e.message);
@@ -555,41 +322,28 @@ function initRelay() {
 function setupChannel(ch) {
   channel = ch;
   setPeerStatusUI("WAITING FOR PEER...", "connecting");
+  const onMsg = (raw) => handlePacket(typeof raw === "string" ? raw : JSON.stringify(raw));
+  if (typeof channel.listen === "function") channel.listen("message", onMsg);
+  else if (typeof channel.on === "function") channel.on("message", onMsg);
 
-  if (typeof channel.listen === "function") {
-    channel.listen("message", (raw) => {
-      const payload = typeof raw === "string" ? raw : JSON.stringify(raw);
-      handlePacket(payload);
-    });
-  } else if (typeof channel.on === "function") {
-    channel.on("message", (raw) => {
-      const payload = typeof raw === "string" ? raw : JSON.stringify(raw);
-      handlePacket(payload);
-    });
-  }
-
-  setInterval(() => {
-    dispatchRaw({ type: "ping", senderId: clientId });
-  }, 3000);
+  clearInterval(pingTimer);
+  pingTimer = setInterval(() => { if (appActive) pingNow(); }, 25000);
+  pingNow();
 }
+function pingNow() { dispatchRaw({ type: "ping", senderId: clientId }); }
 
 function refreshPeerWatchdog() {
   const wasOffline = !peerOnline;
   peerOnline = true;
   clearTimeout(peerWatchdogTimer);
-
   setPeerStatusUI("PEER ONLINE", "online");
-
-  if (wasOffline) {
-    broadcastConfigSync();
-  }
-
+  if (wasOffline) broadcastConfigSync();
   peerWatchdogTimer = setTimeout(() => {
     peerOnline = false;
     clearTimeout(peerTypingTimer);
     typingIndicator.style.display = "none";
     setPeerStatusUI("WAITING FOR PEER...", "connecting");
-  }, 5500);
+  }, 70000);
 }
 
 function setPeerStatusUI(text, state) {
@@ -604,137 +358,160 @@ function handlePacket(raw) {
     const pkg = typeof raw === "string" ? JSON.parse(raw) : raw;
     if (!pkg || pkg.senderId === clientId) return;
 
-    refreshPeerWatchdog();
-
-    switch (pkg.type) {
-      case "ping":
-        break;
-
-      case "rtc-sig":
-        handleRtcSignal(pkg.sig);
-        break;
-
-      case "call-sig":
-        handleCallPacket(pkg.sig);
-        break;
-
-      case "typing":
-        handlePeerTyping(pkg.status);
-        break;
-
-      case "chat":
-        clearTimeout(peerTypingTimer);
-        typingIndicator.style.display = "none";
-
-        if (pkg.isJson) {
-          const decStr = decrypt(pkg.ciphertext);
-          if (decStr && !document.getElementById(pkg.msgId)) {
-            const inner = JSON.parse(decStr);
-            renderBubble(inner.text, "peer", inner.msgId, inner.timestamp, inner.burn, inner.reply, inner.fileData);
-            dispatchRaw({ type: "ack", msgId: inner.msgId, senderId: clientId });
-          }
-        } else {
-          const plain = decrypt(pkg.ciphertext);
-          if (plain && !document.getElementById(pkg.msgId)) {
-            renderBubble(plain, "peer", pkg.msgId, pkg.timestamp, pkg.burn, pkg.reply);
-            dispatchRaw({ type: "ack", msgId: pkg.msgId, senderId: clientId });
-          }
-        }
-        break;
-
-      case "edit":
-        const editedPlain = decrypt(pkg.ciphertext);
-        if (editedPlain) {
-          applyRemoteEdit(pkg.msgId, editedPlain);
-        }
-        break;
-
-      case "reaction":
-        applyReactionToBubble(pkg.msgId, pkg.emoji);
-        break;
-
-      case "ack":
-        confirmAck(pkg.msgId);
-        break;
-
-      case "purge":
-        stream.innerHTML = "";
-        stream.appendChild(typingIndicator);
-        outbox = [];
-        logSys("SESSION BUFFER SHREDDED BY PEER.");
-        break;
-
-      case "config-sync":
-        if (pkg.ciphertext) {
-          const rawConfig = decrypt(pkg.ciphertext);
-          if (rawConfig) {
-            const cfg = JSON.parse(rawConfig);
-            applyRemoteConfig(cfg.enabled, cfg.duration);
-          }
-        }
-        break;
+    if (pkg.type === "ping") {
+      const was = !peerOnline;
+      refreshPeerWatchdog();
+      if (was) pingNow();
+      return;
+    }
+    if (pkg.type === "typing") {
+      refreshPeerWatchdog();
+      handlePeerTyping(pkg.status);
+      return;
+    }
+    if (pkg.type === "ctl") {
+      const plain = decrypt(pkg.c);
+      if (!plain) return;
+      refreshPeerWatchdog();
+      handleCtl(JSON.parse(plain));
     }
   } catch (e) {}
 }
 
+function handleCtl(o) {
+  switch (o.op) {
+    case "chat":
+      clearTimeout(peerTypingTimer);
+      typingIndicator.style.display = "none";
+      receiveMessage(o.m);
+      if (getStoredVaultUrl() && o.m && o.m.msgId) vaultCall({ action: "delete", ids: [o.m.msgId] });
+      break;
+    case "ack": markDelivered(o.id); break;
+    case "read": (o.ids || []).forEach(markRead); break;
+    case "edit": applyRemoteEdit(o.id, String(o.text || "")); break;
+    case "react": applyReactionToBubble(o.id, o.emoji); break;
+    case "purge":
+      wipeLocal();
+      logSys("SESSION BUFFER SHREDDED BY PEER.");
+      break;
+    case "cfg": applyRemoteConfig(o.enabled, o.duration); break;
+    case "call": handleCallSignal(o); break;
+    case "ft": handleFileSignal(o); break;
+  }
+}
+
 function handlePeerTyping(isTyping) {
   clearTimeout(peerTypingTimer);
-
   if (isTyping) {
     typingIndicator.style.display = "flex";
     scrollToBottom(typingIndicator);
-
-    peerTypingTimer = setTimeout(() => {
-      typingIndicator.style.display = "none";
-    }, 3500);
+    peerTypingTimer = setTimeout(() => { typingIndicator.style.display = "none"; }, 3500);
   } else {
     typingIndicator.style.display = "none";
   }
 }
 
-function encrypt(text) {
-  return CryptoJS.AES.encrypt(text, passkey).toString();
+// =====================================================================
+// OFFLINE VAULT (messages wait here until delivered)
+// =====================================================================
+function getVaultRoomHash() {
+  return "v_" + CryptoJS.SHA256(passkey + "_universal_vault_salt").toString().substr(0, 28);
 }
 
-function decrypt(cipher) {
+async function vaultCall(body) {
+  const url = getStoredVaultUrl();
+  if (!url || !passkey) return null;
   try {
-    const bytes = CryptoJS.AES.decrypt(cipher, passkey);
-    return bytes.toString(CryptoJS.enc.Utf8);
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({ room: getVaultRoomHash(), ...body })
+    });
+    return await res.json();
   } catch (e) {
     return null;
   }
 }
 
-function dispatchRaw(dataObj) {
-  if (!channel) return;
-  const jsonStr = JSON.stringify(dataObj);
-
-  if (typeof channel.publish === "function") {
-    channel.publish("message", jsonStr);
-  } else if (typeof channel.send === "function") {
-    channel.send(jsonStr);
-  }
+async function storeInVault(m) {
+  const r = await vaultCall({
+    action: "store",
+    msgId: m.msgId,
+    from: clientId,
+    envelope: encrypt(JSON.stringify(m)),
+    ttlDays: getVaultDays()
+  });
+  if (r && r.status === "stored") return true;
+  const why = {
+    room_full: "VAULT FULL",
+    storage_full: "VAULT STORAGE FULL",
+    too_large: "MESSAGE TOO LARGE FOR VAULT",
+    busy: "VAULT BUSY",
+    unknown_action: "VAULT SCRIPT NEEDS THE NEW VERSION"
+  }[r && r.code] || "VAULT UNREACHABLE";
+  logSys(why + ". SENT LIVE ONLY.");
+  return false;
 }
 
-function sendMessage() {
-  const text = msgInput.value.trim();
-  if (!text || !passkey) {
-    msgInput.focus();
-    return;
+// Collects waiting messages, shows them, then removes only those from the vault.
+async function syncVault() {
+  if (syncing || !passkey || !getStoredVaultUrl()) return;
+  syncing = true;
+  try {
+    const r = await vaultCall({ action: "list" });
+    if (!r || r.status !== "ok") return;
+    const own = new Set();
+    const del = [];
+    let fresh = 0;
+
+    for (const item of r.messages) {
+      let m = null;
+      try {
+        const p = decrypt(item.envelope);
+        if (p) m = JSON.parse(p);
+      } catch (e) {}
+      if (!m) continue;
+      if (m.senderId === clientId) { own.add(item.id); continue; }
+      if (receiveMessage(m)) fresh++;
+      del.push(item.id);
+    }
+    if (del.length) vaultCall({ action: "delete", ids: del });
+
+    if (!r.more) {
+      const now = Date.now();
+      [...pending.keys()].forEach(id => {
+        if (!own.has(id) && now - pending.get(id) > 8000) markDelivered(id, true);
+      });
+    }
+    if (fresh) logSys(`${fresh} OFFLINE MESSAGE(S) RECEIVED.`);
+  } finally {
+    syncing = false;
   }
+}
+setInterval(() => { if (appActive && passkey && getStoredVaultUrl()) syncVault(); }, 20000);
+
+// =====================================================================
+// MESSAGES: send, receive, delivered, read
+// =====================================================================
+function getFormattedTime() {
+  const d = new Date();
+  let hours = d.getHours();
+  const minutes = d.getMinutes().toString().padStart(2, "0");
+  const ampm = hours >= 12 ? "PM" : "AM";
+  hours = hours % 12 || 12;
+  return `${hours}:${minutes} ${ampm}`;
+}
+
+async function sendMessage() {
+  const text = msgInput.value.trim();
+  if (!text || !passkey) { msgInput.focus(); return; }
 
   clearTimeout(localTypingTimeout);
   dispatchRaw({ type: "typing", status: false, senderId: clientId });
 
   if (editingTargetMsgId) {
     applyLocalEdit(editingTargetMsgId, text);
-    dispatchRaw({
-      type: "edit",
-      msgId: editingTargetMsgId,
-      ciphertext: encrypt(text),
-      senderId: clientId
-    });
-
+    sendCtl({ op: "edit", id: editingTargetMsgId, text });
     msgInput.value = "";
     msgInput.style.height = "auto";
     cancelReplyOrEdit();
@@ -742,392 +519,108 @@ function sendMessage() {
     return;
   }
 
-  const msgId = "m_" + Math.random().toString(36).substr(2, 8);
-  const nowTime = getFormattedTime();
-  const activeBurn = disappearingEnabled ? burnDuration : 0;
-  const replyPayload = activeQuotedTarget ? { ...activeQuotedTarget } : null;
+  const m = {
+    msgId: "m_" + uid(),
+    text,
+    timestamp: getFormattedTime(),
+    burn: disappearingEnabled ? burnDuration : 0,
+    reply: activeQuotedTarget ? { ...activeQuotedTarget } : null,
+    senderId: clientId
+  };
 
   msgInput.value = "";
   msgInput.style.height = "auto";
   cancelReplyOrEdit();
   msgInput.focus();
 
-  const newBubble = renderBubble(text, "you", msgId, nowTime, activeBurn, replyPayload);
-  outbox.push({ msgId, text, timestamp: nowTime, burn: activeBurn, reply: replyPayload, lastSent: Date.now() });
+  const bubble = renderBubble(m.text, "you", m.msgId, m.timestamp, m.burn, m.reply);
+  pending.set(m.msgId, Date.now());
+  sendCtl({ op: "chat", m });   // instant path when the peer is online
 
-  dispatchRaw({
-    type: "chat",
-    msgId: msgId,
-    ciphertext: encrypt(text),
-    timestamp: nowTime,
-    burn: activeBurn,
-    reply: replyPayload,
-    senderId: clientId
-  });
-
-  if (!peerOnline) {
-    storeInOfflineVault({
-      msgId: msgId,
-      text: text,
-      timestamp: nowTime,
-      burn: activeBurn,
-      reply: replyPayload,
-      senderId: clientId
-    });
-  }
-
-  scrollToBottom(newBubble);
-}
-
-setInterval(() => {
-  if (!channel || outbox.length === 0 || isFlushing) return;
-
-  isFlushing = true;
-  const now = Date.now();
-
-  outbox.forEach(item => {
-    if (now - item.lastSent > 4000) {
-      item.lastSent = now;
-      dispatchRaw({
-        type: "chat",
-        msgId: item.msgId,
-        ciphertext: encrypt(item.text),
-        timestamp: item.timestamp,
-        burn: item.burn,
-        reply: item.reply,
-        senderId: clientId
-      });
-    }
-  });
-
-  isFlushing = false;
-}, 3000);
-
-function getFormattedTime() {
-  const d = new Date();
-  let hours = d.getHours();
-  const minutes = d.getMinutes().toString().padStart(2, "0");
-  const ampm = hours >= 12 ? "PM" : "AM";
-  hours = hours % 12;
-  hours = hours ? hours : 12;
-  return `${hours}:${minutes} ${ampm}`;
-}
-
-function checkIsSoloEmoji(text) {
-  return text && text.length <= 4 && /\p{Extended_Pictographic}/u.test(text);
-}
-
-function setupBubbleInteractions(wrap, text, role) {
-  let startX = 0;
-  let currentX = 0;
-  let isSwiping = false;
-  let longPressTimer = null;
-  const swipeIcon = wrap.querySelector(".swipe-reply-icon");
-
-  wrap.addEventListener("touchstart", (e) => {
-    startX = e.touches[0].clientX;
-    isSwiping = false;
-
-    longPressTimer = setTimeout(() => {
-      if (!isSwiping) {
-        openClampedContextMenu(wrap, text, role);
-      }
-    }, 450);
-  }, { passive: true });
-
-  wrap.addEventListener("touchmove", (e) => {
-    currentX = e.touches[0].clientX;
-    const diffX = currentX - startX;
-
-    if (diffX > 10) {
-      clearTimeout(longPressTimer);
-      isSwiping = true;
-      const boundedX = Math.min(diffX, 60);
-      wrap.style.transform = `translateX(${boundedX}px)`;
-      if (swipeIcon) swipeIcon.style.opacity = boundedX / 60;
-    }
-  }, { passive: true });
-
-  wrap.addEventListener("touchend", () => {
-    clearTimeout(longPressTimer);
-    const diffX = currentX - startX;
-
-    if (isSwiping && diffX >= 50) {
-      if (navigator.vibrate) navigator.vibrate(12);
-      setReplyTarget(text, role === "you" ? "You" : "Peer");
-    }
-
-    wrap.style.transform = "translateX(0px)";
-    if (swipeIcon) swipeIcon.style.opacity = 0;
-    isSwiping = false;
-    startX = 0;
-    currentX = 0;
-  });
-}
-
-function openClampedContextMenu(bubbleWrap, text, role) {
-  activeContextTarget = { wrap: bubbleWrap, text: text, role: role, id: bubbleWrap.id };
-
-  const dock = document.getElementById("reaction-dock");
-  const menu = document.getElementById("msg-context-menu");
-  const editItem = document.getElementById("context-edit-item");
-
-  editItem.style.display = role === "you" ? "flex" : "none";
-
-  const rect = bubbleWrap.getBoundingClientRect();
-  const streamRect = stream.getBoundingClientRect();
-  const screenWidth = window.innerWidth;
-
-  const isNearTop = (rect.top - streamRect.top) < 65;
-
-  let dockTop = isNearTop
-    ? (rect.bottom - streamRect.top + 8)
-    : (rect.top - streamRect.top - 46);
-
-  let menuTop = isNearTop
-    ? (dockTop + 48)
-    : (rect.bottom - streamRect.top + 6);
-
-  let dockLeft = role === "you"
-    ? Math.max(12, screenWidth - 280)
-    : Math.min(screenWidth - 280, Math.max(12, rect.left - streamRect.left));
-
-  let menuLeft = role === "you"
-    ? Math.max(12, screenWidth - 170)
-    : Math.max(12, rect.left - streamRect.left);
-
-  dock.style.top = `${dockTop}px`;
-  dock.style.left = `${dockLeft}px`;
-  dock.style.display = "flex";
-
-  menu.style.top = `${menuTop}px`;
-  menu.style.left = `${menuLeft}px`;
-  menu.style.display = "flex";
-
-  if (navigator.vibrate) navigator.vibrate(15);
-
-  setTimeout(() => {
-    document.addEventListener("click", closeContextModals);
-    document.addEventListener("touchstart", closeContextModals);
-  }, 100);
-}
-
-function closeContextModals(e) {
-  const dock = document.getElementById("reaction-dock");
-  const menu = document.getElementById("msg-context-menu");
-  if (dock && menu && !dock.contains(e.target) && !menu.contains(e.target)) {
-    dock.style.display = "none";
-    menu.style.display = "none";
-    document.removeEventListener("click", closeContextModals);
-    document.removeEventListener("touchstart", closeContextModals);
-  }
-}
-
-function triggerContextAction(action) {
-  if (!activeContextTarget) return;
-
-  if (action === "reply") {
-    setReplyTarget(activeContextTarget.text, activeContextTarget.role === "you" ? "You" : "Peer");
-  } else if (action === "copy") {
-    navigator.clipboard?.writeText(activeContextTarget.text);
-  } else if (action === "edit") {
-    startEditMessage(activeContextTarget.id, activeContextTarget.text);
-  }
-
-  document.getElementById("reaction-dock").style.display = "none";
-  document.getElementById("msg-context-menu").style.display = "none";
-}
-
-function startEditMessage(msgId, currentText) {
-  editingTargetMsgId = msgId;
-  activeQuotedTarget = null;
-
-  document.getElementById("reply-target-title").innerText = "Editing message";
-  document.getElementById("reply-target-text").innerText = currentText;
-  document.getElementById("reply-preview-bar").style.display = "flex";
-
-  msgInput.value = currentText;
-  resizeInputBox();
-  msgInput.focus();
-}
-
-function applyLocalEdit(msgId, newText) {
-  const wrap = document.getElementById(msgId);
-  if (wrap) {
-    const textNode = wrap.querySelector(".msg-text");
-    if (textNode) textNode.innerText = newText;
-    addEditedBadge(wrap);
-  }
-  const outboxItem = outbox.find(i => i.msgId === msgId);
-  if (outboxItem) outboxItem.text = newText;
-}
-
-function applyRemoteEdit(msgId, newText) {
-  const wrap = document.getElementById(msgId);
-  if (wrap) {
-    const textNode = wrap.querySelector(".msg-text");
-    if (textNode) textNode.innerText = newText;
-    addEditedBadge(wrap);
-  }
-}
-
-function addEditedBadge(wrap) {
-  const meta = wrap.querySelector(".msg-meta");
-  if (meta && !meta.querySelector(".edited-badge")) {
-    const b = document.createElement("span");
-    b.className = "edited-badge";
-    b.innerText = "edited";
-    meta.insertBefore(b, meta.firstChild);
-  }
-}
-
-function setReplyTarget(text, senderLabel) {
-  editingTargetMsgId = null;
-  activeQuotedTarget = { sender: senderLabel, text: text };
-  document.getElementById("reply-target-title").innerText = `Replying to ${senderLabel}`;
-  document.getElementById("reply-target-text").innerText = text;
-  document.getElementById("reply-preview-bar").style.display = "flex";
-  msgInput.focus();
-}
-
-function cancelReplyOrEdit() {
-  activeQuotedTarget = null;
-  editingTargetMsgId = null;
-  document.getElementById("reply-preview-bar").style.display = "none";
-}
-
-function selectReaction(emoji) {
-  if (!activeContextTarget) return;
-  applyReactionToBubble(activeContextTarget.id, emoji);
-
-  dispatchRaw({
-    type: "reaction",
-    msgId: activeContextTarget.id,
-    emoji: emoji,
-    senderId: clientId
-  });
-
-  document.getElementById("reaction-dock").style.display = "none";
-  document.getElementById("msg-context-menu").style.display = "none";
-}
-
-function applyReactionToBubble(msgId, emoji) {
-  const wrap = document.getElementById(msgId);
-  if (!wrap) return;
-  const reactionEl = wrap.querySelector(".bubble-reaction");
-  if (reactionEl) {
-    reactionEl.innerText = emoji;
-    reactionEl.style.display = "block";
-  }
-}
-
-// -------------------------------------------------------------
-// RENDER GOOGLE PAY STYLE ROUNDED PILL BUBBLES
-// -------------------------------------------------------------
-function renderBubble(text, role, msgId, timeStr, burnSecs, replyData, fileData) {
-  const wrap = document.createElement("div");
-  wrap.className = `msg-wrap ${role}`;
-  wrap.id = msgId;
-
-  const displayTime = timeStr || getFormattedTime();
-  const isBurnActive = burnSecs && burnSecs > 0;
-  const isSolo = !fileData && checkIsSoloEmoji(text);
-
-  let badgeHtml = "";
-  if (isBurnActive) {
-    badgeHtml = `
-      <span class="burn-badge">
-        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="12 6 12 12 16 14"/></svg>
-        <span class="burn-digit">${burnSecs}s</span>
-      </span>`;
-  }
-
-  let quotedHtml = "";
-  if (replyData && replyData.text) {
-    quotedHtml = `
-      <div class="quoted-card">
-        <strong style="color:var(--accent); font-size:11px;">${escapeHtml(replyData.sender)}</strong><br/>
-        ${escapeHtml(replyData.text)}
-      </div>
-    `;
-  }
-
-  let mediaHtml = "";
-  if (fileData && fileData.data) {
-    if (fileData.mime && fileData.mime.startsWith("image/")) {
-      mediaHtml = `<img src="${fileData.data}" class="media-preview" alt="Encrypted Image" />`;
-    } else {
-      mediaHtml = `<a href="${fileData.data}" download="${escapeHtml(fileData.name || 'file')}" class="file-card">📎 ${escapeHtml(fileData.name || 'Encrypted File')}</a>`;
-    }
-  }
-
-  const textBodyHtml = fileData && fileData.mime && fileData.mime.startsWith("image/")
-    ? ""
-    : `<span class="msg-text">${escapeHtml(text)}</span>`;
-
-  if (role === "you") {
-    wrap.innerHTML = `
-      <div class="swipe-reply-icon">
-        <svg viewBox="0 0 24 24"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg>
-      </div>
-      <div class="bubble ${isSolo ? 'emoji-solo' : ''}">
-        ${quotedHtml}
-        ${mediaHtml}
-        ${textBodyHtml}
-        <div class="msg-meta">
-          ${badgeHtml}
-          <span class="timestamp">${displayTime}</span>
-          <span class="ticks">✓</span>
-        </div>
-        <div class="bubble-reaction"></div>
-      </div>
-    `;
-    wrap.dataset.burnSecs = isBurnActive ? burnSecs : 0;
+  if (getStoredVaultUrl()) {
+    storeInVault(m);            // safety copy until the peer confirms delivery
   } else {
-    wrap.innerHTML = `
-      <div class="swipe-reply-icon">
-        <svg viewBox="0 0 24 24"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg>
-      </div>
-      <div class="bubble ${isSolo ? 'emoji-solo' : ''}">
-        ${quotedHtml}
-        ${mediaHtml}
-        ${textBodyHtml}
-        <div class="msg-meta">
-          ${badgeHtml}
-          <span class="timestamp">${displayTime}</span>
-        </div>
-        <div class="bubble-reaction"></div>
-      </div>
-    `;
-    if (isBurnActive) {
-      startBurn(wrap, burnSecs);
-    }
+    outbox.push({ m, tries: 0, next: Date.now() + 4000 });
   }
-
-  setupBubbleInteractions(wrap, text, role);
-  stream.insertBefore(wrap, typingIndicator);
-  scrollToBottom(wrap);
-  return wrap;
+  scrollToBottom(bubble);
 }
 
-function confirmAck(msgId) {
-  outbox = outbox.filter(item => item.msgId !== msgId);
-  const wrap = document.getElementById(msgId);
-  if (wrap) {
-    const ticks = wrap.querySelector(".ticks");
-    if (ticks) {
-      ticks.innerText = "✓✓";
-      ticks.classList.add("seen");
-    }
-    const burnSecs = parseInt(wrap.dataset.burnSecs || 0);
-    if (burnSecs > 0 && !wrap.dataset.burning) {
-      wrap.dataset.burning = "true";
-      startBurn(wrap, burnSecs);
-    }
+// Without a vault: retry up to 3 times, then stop.
+setInterval(() => {
+  if (!channel || !outbox.length) return;
+  const now = Date.now();
+  outbox.forEach(o => {
+    if (now < o.next || o.tries >= 3) return;
+    o.tries++;
+    o.next = now + (o.tries === 1 ? 15000 : 60000);
+    sendCtl({ op: "chat", m: o.m });
+  });
+}, 5000);
+
+// Returns true if the message is new.
+function receiveMessage(m) {
+  if (!m || typeof m.msgId !== "string") return false;
+  if (seenIds.has(m.msgId)) {
+    sendCtl({ op: "ack", id: m.msgId });
+    return false;
   }
+  seenIds.add(m.msgId);
+
+  let reply = null;
+  if (m.reply && m.reply.text) {
+    // "You" and "Peer" are from the sender's point of view, so swap them.
+    reply = { sender: m.reply.sender === "You" ? "Peer" : "You", text: String(m.reply.text) };
+  }
+  renderBubble(String(m.text || ""), "peer", m.msgId, String(m.timestamp || ""), Number(m.burn) || 0, reply);
+  sendCtl({ op: "ack", id: m.msgId });
+  afterPeerBubble(m.msgId);
+  return true;
+}
+
+// "Read" means the app is actually open and visible.
+function afterPeerBubble(id) {
+  if (appActive) markPeerRead([id]);
+  else unread.add(id);
+}
+function markPeerRead(ids) {
+  const ok = [];
+  ids.forEach(id => {
+    unread.delete(id);
+    const w = $(id);
+    if (!w) return;
+    ok.push(id);
+    const b = parseInt(w.dataset.burnSecs || 0, 10);
+    if (b > 0) startBurn(w, b);
+  });
+  if (ok.length) sendCtl({ op: "read", ids: ok });
+}
+function flushUnread() {
+  if (unread.size) markPeerRead([...unread]);
+}
+
+function markDelivered(id, skipVaultDelete) {
+  pending.delete(id);
+  outbox = outbox.filter(o => o.m.msgId !== id);
+  const w = $(id);
+  if (w && w.dataset.role === "you") {
+    const t = w.querySelector(".ticks");
+    if (t && !t.classList.contains("seen")) t.innerText = "✓✓";
+  }
+  if (!skipVaultDelete && getStoredVaultUrl()) vaultCall({ action: "delete", ids: [id] });
+}
+function markRead(id) {
+  markDelivered(id, true);
+  const w = $(id);
+  if (!w || w.dataset.role !== "you") return;
+  const t = w.querySelector(".ticks");
+  if (t) { t.innerText = "✓✓"; t.classList.add("seen"); }
+  const b = parseInt(w.dataset.burnSecs || 0, 10);
+  if (b > 0) startBurn(w, b);
 }
 
 function startBurn(node, seconds) {
+  if (node.dataset.burning) return;
+  node.dataset.burning = "1";
   let s = seconds;
   const digit = node.querySelector(".burn-digit");
   const interval = setInterval(() => {
@@ -1143,6 +636,97 @@ function startBurn(node, seconds) {
   }, 1000);
 }
 
+function wipeLocal() {
+  stream.innerHTML = "";
+  stream.appendChild(typingIndicator);
+  outbox = [];
+  pending.clear();
+  unread.clear();
+}
+
+// =====================================================================
+// BUBBLE RENDERING (all peer-supplied values are escaped)
+// =====================================================================
+function escapeHtml(str) {
+  if (!str) return "";
+  return String(str).replace(/[&<>"']/g, m =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[m]));
+}
+function fmtSize(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(0) + " KB";
+  return (n / 1048576).toFixed(1) + " MB";
+}
+
+function renderBubble(text, role, msgId, timeStr, burnSecs, replyData, fileData) {
+  const wrap = document.createElement("div");
+  wrap.className = `msg-wrap ${role}`;
+  wrap.id = msgId;
+  wrap.dataset.role = role;
+
+  burnSecs = Number(burnSecs) || 0;
+  const displayTime = escapeHtml(timeStr || getFormattedTime());
+  const isSolo = !fileData && checkIsSoloEmoji(text);
+  const isImg = !!(fileData && /^image\/(png|jpe?g|gif|webp)$/.test(fileData.mime || ""));
+
+  const badgeHtml = burnSecs > 0 ? `
+    <span class="burn-badge">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><polyline points="12 6 12 12 16 14"/></svg>
+      <span class="burn-digit">${burnSecs}s</span>
+    </span>` : "";
+
+  const quotedHtml = (replyData && replyData.text) ? `
+    <div class="quoted-card">
+      <strong style="color:var(--accent); font-size:11px;">${escapeHtml(replyData.sender)}</strong><br/>
+      ${escapeHtml(replyData.text)}
+    </div>` : "";
+
+  const textBodyHtml = isImg ? "" : `<span class="msg-text">${escapeHtml(text)}</span>`;
+  const ticksHtml = role === "you" ? '<span class="ticks">✓</span>' : "";
+
+  wrap.innerHTML = `
+    <div class="swipe-reply-icon">
+      <svg viewBox="0 0 24 24"><path d="M10 9V5l-7 7 7 7v-4.1c5 0 8.5 1.6 11 5.1-1-5-4-10-11-11z"/></svg>
+    </div>
+    <div class="bubble ${isSolo ? "emoji-solo" : ""}">
+      ${quotedHtml}
+      <div class="media-slot"></div>
+      ${textBodyHtml}
+      <div class="msg-meta">
+        ${badgeHtml}
+        <span class="timestamp">${displayTime}</span>
+        ${ticksHtml}
+      </div>
+      <div class="bubble-reaction"></div>
+    </div>`;
+  wrap.dataset.burnSecs = burnSecs;
+
+  // Files are attached with DOM calls only (never built from text).
+  if (fileData && fileData.url && String(fileData.url).startsWith("blob:")) {
+    const slot = wrap.querySelector(".media-slot");
+    if (isImg) {
+      const img = document.createElement("img");
+      img.className = "media-preview";
+      img.src = fileData.url;
+      img.alt = "Image";
+      slot.appendChild(img);
+    } else {
+      const a = document.createElement("a");
+      a.className = "file-card";
+      a.href = fileData.url;
+      a.download = fileData.name || "file";
+      a.textContent = "📎 " + (fileData.name || "File") + " (" + fmtSize(fileData.size) + ")";
+      slot.appendChild(a);
+    }
+  }
+
+  setupBubbleInteractions(wrap, text, role);
+  stream.insertBefore(wrap, typingIndicator);
+  scrollToBottom(wrap);
+  return wrap;
+}
+
 function logSys(msg) {
   const el = document.createElement("div");
   el.className = "sys-log";
@@ -1151,31 +735,590 @@ function logSys(msg) {
   scrollToBottom(el);
 }
 
-function escapeHtml(str) {
-  if (!str) return "";
-  return str.replace(/[&<>"']/g, function(m) {
-    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[m];
+// =====================================================================
+// BUBBLE GESTURES, REPLY, EDIT, REACTIONS
+// =====================================================================
+function setupBubbleInteractions(wrap, text, role) {
+  let startX = 0, currentX = 0, isSwiping = false, longPressTimer = null;
+  const swipeIcon = wrap.querySelector(".swipe-reply-icon");
+
+  wrap.addEventListener("touchstart", (e) => {
+    startX = e.touches[0].clientX;
+    isSwiping = false;
+    longPressTimer = setTimeout(() => {
+      if (!isSwiping) openClampedContextMenu(wrap, text, role);
+    }, 450);
+  }, { passive: true });
+
+  wrap.addEventListener("touchmove", (e) => {
+    currentX = e.touches[0].clientX;
+    const diffX = currentX - startX;
+    if (diffX > 10) {
+      clearTimeout(longPressTimer);
+      isSwiping = true;
+      const boundedX = Math.min(diffX, 60);
+      wrap.style.transform = `translateX(${boundedX}px)`;
+      if (swipeIcon) swipeIcon.style.opacity = boundedX / 60;
+    }
+  }, { passive: true });
+
+  wrap.addEventListener("touchend", () => {
+    clearTimeout(longPressTimer);
+    const diffX = currentX - startX;
+    if (isSwiping && diffX >= 50) {
+      if (navigator.vibrate) navigator.vibrate(12);
+      setReplyTarget(text, role === "you" ? "You" : "Peer");
+    }
+    wrap.style.transform = "translateX(0px)";
+    if (swipeIcon) swipeIcon.style.opacity = 0;
+    isSwiping = false;
+    startX = 0;
+    currentX = 0;
   });
 }
 
+function openClampedContextMenu(bubbleWrap, text, role) {
+  activeContextTarget = { wrap: bubbleWrap, text, role, id: bubbleWrap.id };
+  const dock = $("reaction-dock");
+  const menu = $("msg-context-menu");
+  $("context-edit-item").style.display = role === "you" ? "flex" : "none";
+
+  const rect = bubbleWrap.getBoundingClientRect();
+  const streamRect = stream.getBoundingClientRect();
+  const screenWidth = window.innerWidth;
+  const isNearTop = (rect.top - streamRect.top) < 65;
+
+  const dockTop = isNearTop ? (rect.bottom - streamRect.top + 8) : (rect.top - streamRect.top - 46);
+  const menuTop = isNearTop ? (dockTop + 48) : (rect.bottom - streamRect.top + 6);
+  const dockLeft = role === "you"
+    ? Math.max(12, screenWidth - 280)
+    : Math.min(screenWidth - 280, Math.max(12, rect.left - streamRect.left));
+  const menuLeft = role === "you"
+    ? Math.max(12, screenWidth - 170)
+    : Math.max(12, rect.left - streamRect.left);
+
+  dock.style.top = `${dockTop}px`;
+  dock.style.left = `${dockLeft}px`;
+  dock.style.display = "flex";
+  menu.style.top = `${menuTop}px`;
+  menu.style.left = `${menuLeft}px`;
+  menu.style.display = "flex";
+  if (navigator.vibrate) navigator.vibrate(15);
+
+  setTimeout(() => {
+    document.addEventListener("click", closeContextModals);
+    document.addEventListener("touchstart", closeContextModals);
+  }, 100);
+}
+
+function closeContextModals(e) {
+  const dock = $("reaction-dock");
+  const menu = $("msg-context-menu");
+  if (!dock.contains(e.target) && !menu.contains(e.target)) {
+    dock.style.display = "none";
+    menu.style.display = "none";
+    document.removeEventListener("click", closeContextModals);
+    document.removeEventListener("touchstart", closeContextModals);
+  }
+}
+
+function triggerContextAction(action) {
+  if (!activeContextTarget) return;
+  if (action === "reply") {
+    setReplyTarget(activeContextTarget.text, activeContextTarget.role === "you" ? "You" : "Peer");
+  } else if (action === "copy") {
+    navigator.clipboard?.writeText(activeContextTarget.text);
+  } else if (action === "edit") {
+    startEditMessage(activeContextTarget.id, activeContextTarget.text);
+  }
+  $("reaction-dock").style.display = "none";
+  $("msg-context-menu").style.display = "none";
+}
+
+function startEditMessage(msgId, currentText) {
+  editingTargetMsgId = msgId;
+  activeQuotedTarget = null;
+  $("reply-target-title").innerText = "Editing message";
+  $("reply-target-text").innerText = currentText;
+  $("reply-preview-bar").style.display = "flex";
+  msgInput.value = currentText;
+  resizeInputBox();
+  msgInput.focus();
+}
+
+function applyLocalEdit(msgId, newText) {
+  const wrap = $(msgId);
+  if (wrap) {
+    const node = wrap.querySelector(".msg-text");
+    if (node) node.innerText = newText;
+    addEditedBadge(wrap);
+  }
+}
+function applyRemoteEdit(msgId, newText) {
+  const wrap = $(msgId);
+  if (wrap && wrap.dataset.role === "peer") {   // a peer can only edit its own messages
+    const node = wrap.querySelector(".msg-text");
+    if (node) node.innerText = newText;
+    addEditedBadge(wrap);
+  }
+}
+function addEditedBadge(wrap) {
+  const meta = wrap.querySelector(".msg-meta");
+  if (meta && !meta.querySelector(".edited-badge")) {
+    const b = document.createElement("span");
+    b.className = "edited-badge";
+    b.innerText = "edited";
+    meta.insertBefore(b, meta.firstChild);
+  }
+}
+
+function setReplyTarget(text, senderLabel) {
+  editingTargetMsgId = null;
+  activeQuotedTarget = { sender: senderLabel, text };
+  $("reply-target-title").innerText = `Replying to ${senderLabel}`;
+  $("reply-target-text").innerText = text;
+  $("reply-preview-bar").style.display = "flex";
+  msgInput.focus();
+}
+function cancelReplyOrEdit() {
+  activeQuotedTarget = null;
+  editingTargetMsgId = null;
+  $("reply-preview-bar").style.display = "none";
+}
+
+function selectReaction(emoji) {
+  if (!activeContextTarget) return;
+  applyReactionToBubble(activeContextTarget.id, emoji);
+  sendCtl({ op: "react", id: activeContextTarget.id, emoji });
+  $("reaction-dock").style.display = "none";
+  $("msg-context-menu").style.display = "none";
+}
+function applyReactionToBubble(msgId, emoji) {
+  const wrap = $(msgId);
+  if (!wrap) return;
+  const el = wrap.querySelector(".bubble-reaction");
+  if (el) { el.innerText = String(emoji || "").slice(0, 8); el.style.display = "block"; }
+}
+
+// =====================================================================
+// CALLS (voice + video) over WebRTC
+// =====================================================================
+const call = { state: "idle", video: false, pc: null, local: null, ice: [], timer: null, tick: null, t0: 0, micOn: true, camOn: true };
+
+function getIceServers() {
+  const list = [{ urls: "stun:stun.l.google.com:19302" }];
+  const t = getTurnConfig();
+  if (t && t.url) list.push({ urls: t.url, username: t.user || undefined, credential: t.cred || undefined });
+  return list;
+}
+
+function triggerCallHandOff(isVideo) { startCall(!!isVideo); }
+
+function callUI(show, title, sub, mode) {
+  $("call-screen").style.display = show ? "flex" : "none";
+  if (!show) return;
+  $("call-title").innerText = title;
+  $("call-sub").innerText = sub || "";
+  $("call-accept").hidden = mode !== "ringing";
+  $("call-mic").hidden = mode === "ringing";
+  $("call-spk").hidden = mode === "ringing";
+  $("call-cam").hidden = mode === "ringing" || !call.video;
+  $("call-end").innerText = mode === "ringing" ? "Decline" : "End";
+  refreshCallButtons();
+}
+
+function refreshCallButtons() {
+  const remote = $("remote-media");
+  $("call-mic").innerText = call.micOn ? "Mute" : "Unmute";
+  $("call-mic").classList.toggle("off", !call.micOn);
+  $("call-cam").innerText = call.camOn ? "Camera off" : "Camera on";
+  $("call-cam").classList.toggle("off", !call.camOn);
+  $("call-spk").classList.toggle("off", !!remote.muted);
+  const hdrMic = $("mic-toggle-btn");
+  const hdrSpk = $("speaker-toggle-btn");
+  if (hdrMic) hdrMic.classList.toggle("mic-active", call.state !== "idle" && call.micOn);
+  if (hdrSpk) hdrSpk.classList.toggle("speaker-muted", !!remote.muted);
+}
+
+function showLocal() {
+  const lv = $("local-media");
+  lv.srcObject = call.local;
+  lv.style.display = call.video && call.local ? "block" : "none";
+}
+
+async function getMedia(video) {
+  return navigator.mediaDevices.getUserMedia({ audio: true, video: video ? { facingMode: "user" } : false });
+}
+
+async function startCall(video) {
+  if (call.state !== "idle") return;
+  if (!passkey || !channel || !peerOnline) {
+    return uiAlert("Peer is offline", "Calls need both phones online with the app open.");
+  }
+  try {
+    call.local = await getMedia(video);
+  } catch (e) {
+    return uiAlert("Permission needed", "Microphone" + (video ? " and camera" : "") + " access was blocked.");
+  }
+  call.state = "calling";
+  call.video = video;
+  call.micOn = true;
+  call.camOn = true;
+  showLocal();
+  callUI(true, "Calling…", video ? "Video call" : "Voice call", "calling");
+  sendCtl({ op: "call", k: "invite", video });
+  call.timer = setTimeout(() => { if (call.state === "calling") endCall("NO ANSWER", true); }, 45000);
+}
+
+async function acceptCall() {
+  if (call.state !== "ringing") return;
+  clearTimeout(call.timer);
+  try {
+    call.local = await getMedia(call.video);
+  } catch (e) {
+    sendCtl({ op: "call", k: "decline" });
+    call.state = "idle";
+    callUI(false);
+    return uiAlert("Permission needed", "Microphone" + (call.video ? " and camera" : "") + " access was blocked.");
+  }
+  call.micOn = true;
+  call.camOn = true;
+  showLocal();
+  await buildPeer();
+  callUI(true, "Connecting…", "", "calling");
+  sendCtl({ op: "call", k: "accept" });
+}
+
+function hangUp() {
+  if (call.state === "ringing") endCall("CALL DECLINED", true);
+  else endCall("CALL ENDED", true);
+}
+
+async function buildPeer() {
+  const pc = new RTCPeerConnection({ iceServers: getIceServers() });
+  call.pc = pc;
+  call.ice = [];
+  pc.onicecandidate = (e) => {
+    if (e.candidate) sendCtl({ op: "call", k: "ice", c: e.candidate });
+  };
+  pc.ontrack = (e) => {
+    const rm = $("remote-media");
+    if (e.streams && e.streams[0]) {
+      rm.srcObject = e.streams[0];
+      rm.play().catch(() => {});
+    }
+  };
+  pc.onconnectionstatechange = () => {
+    if (call.pc !== pc) return;
+    if (pc.connectionState === "connected" && call.state !== "active") {
+      call.state = "active";
+      call.t0 = Date.now();
+      callUI(true, call.video ? "Video call" : "Voice call", "00:00", "active");
+      clearInterval(call.tick);
+      call.tick = setInterval(() => {
+        const s = Math.floor((Date.now() - call.t0) / 1000);
+        $("call-sub").innerText = String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+      }, 1000);
+    } else if (pc.connectionState === "failed") {
+      endCall("CONNECTION FAILED. A TURN SERVER MAY BE NEEDED ON MOBILE DATA.", true);
+    }
+  };
+  call.local.getTracks().forEach(t => pc.addTrack(t, call.local));
+}
+
+async function drainCallIce() {
+  while (call.pc && call.pc.remoteDescription && call.ice.length) {
+    try { await call.pc.addIceCandidate(call.ice.shift()); } catch (e) {}
+  }
+}
+
+async function handleCallSignal(o) {
+  try {
+    switch (o.k) {
+      case "invite":
+        if (call.state !== "idle") { sendCtl({ op: "call", k: "busy" }); return; }
+        call.state = "ringing";
+        call.video = !!o.video;
+        callUI(true, "Incoming " + (o.video ? "video" : "voice") + " call", "Peer is calling…", "ringing");
+        if (navigator.vibrate) navigator.vibrate([300, 200, 300, 200, 300]);
+        call.timer = setTimeout(() => { if (call.state === "ringing") endCall("MISSED CALL", true); }, 45000);
+        break;
+      case "accept":
+        if (call.state !== "calling") return;
+        clearTimeout(call.timer);
+        callUI(true, "Connecting…", "", "calling");
+        await buildPeer();
+        {
+          const offer = await call.pc.createOffer();
+          await call.pc.setLocalDescription(offer);
+          sendCtl({ op: "call", k: "sdp", sdp: call.pc.localDescription });
+        }
+        break;
+      case "sdp":
+        if (!call.pc) return;
+        await call.pc.setRemoteDescription(o.sdp);
+        await drainCallIce();
+        if (o.sdp.type === "offer") {
+          const ans = await call.pc.createAnswer();
+          await call.pc.setLocalDescription(ans);
+          sendCtl({ op: "call", k: "sdp", sdp: call.pc.localDescription });
+        }
+        break;
+      case "ice":
+        if (!call.pc) return;
+        call.ice.push(o.c);
+        await drainCallIce();
+        break;
+      case "decline": endCall("CALL DECLINED", false); break;
+      case "busy": endCall("PEER IS BUSY", false); break;
+      case "end": endCall("CALL ENDED", false); break;
+    }
+  } catch (e) {
+    endCall("CALL ERROR", true);
+  }
+}
+
+function endCall(reason, notify) {
+  if (call.state === "idle") return;
+  if (notify) sendCtl({ op: "call", k: call.state === "ringing" ? "decline" : "end" });
+  clearTimeout(call.timer);
+  clearInterval(call.tick);
+  if (call.local) call.local.getTracks().forEach(t => t.stop());
+  if (call.pc) { try { call.pc.close(); } catch (e) {} }
+  const rm = $("remote-media");
+  rm.srcObject = null;
+  rm.muted = false;
+  $("local-media").srcObject = null;
+  call.state = "idle";
+  call.pc = null;
+  call.local = null;
+  call.ice = [];
+  callUI(false);
+  refreshCallButtons();
+  if (reason) logSys(reason);
+}
+
+function toggleMic() {
+  if (!call.local) return uiAlert("No active call", "Start a voice or video call first.");
+  call.micOn = !call.micOn;
+  call.local.getAudioTracks().forEach(t => { t.enabled = call.micOn; });
+  refreshCallButtons();
+}
+function toggleCam() {
+  if (!call.local) return;
+  call.camOn = !call.camOn;
+  call.local.getVideoTracks().forEach(t => { t.enabled = call.camOn; });
+  $("local-media").style.display = call.camOn ? "block" : "none";
+  refreshCallButtons();
+}
+function toggleSpeaker() {
+  if (call.state === "idle") return uiAlert("No active call", "Start a voice or video call first.");
+  const rm = $("remote-media");
+  rm.muted = !rm.muted;
+  refreshCallButtons();
+}
+
+// =====================================================================
+// FILE TRANSFER: direct phone-to-phone over a WebRTC data channel
+// =====================================================================
+let ft = null;
+const FT_MAX = 50 * 1024 * 1024;
+
+function setProgress(text) {
+  let el = $("ft-progress");
+  if (!text) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "ft-progress";
+    el.className = "sys-log";
+    stream.insertBefore(el, typingIndicator);
+  }
+  el.innerText = text;
+  scrollToBottom(el);
+}
+
+function ftCleanup() {
+  if (!ft) return;
+  try { if (ft.dc) ft.dc.close(); } catch (e) {}
+  try { if (ft.pc) ft.pc.close(); } catch (e) {}
+  clearTimeout(ft.timer);
+  setProgress(null);
+  ft = null;
+}
+
+function ftFail(msg) {
+  const failedId = ft && ft.msgId;
+  ftCleanup();
+  if (failedId) {
+    const t = $(failedId) && $(failedId).querySelector(".ticks");
+    if (t) { t.innerText = "!"; t.style.color = "#ef4444"; }
+    pending.delete(failedId);
+  }
+  logSys("FILE TRANSFER FAILED: " + msg);
+}
+
+function ftNewPeer(t) {
+  const pc = new RTCPeerConnection({ iceServers: getIceServers() });
+  pc.onicecandidate = (e) => { if (e.candidate) sendCtl({ op: "ft", k: "ice", t, c: e.candidate }); };
+  pc.onconnectionstatechange = () => {
+    if (ft && ft.pc === pc && pc.connectionState === "failed") {
+      ftFail("Connection failed. A TURN server may be needed on mobile data.");
+    }
+  };
+  return pc;
+}
+
+async function ftDrain() {
+  while (ft && ft.pc.remoteDescription && ft.ice.length) {
+    try { await ft.pc.addIceCandidate(ft.ice.shift()); } catch (e) {}
+  }
+}
+
+function triggerFileSelect() { $("file-picker").click(); }
+
+function handleFileSelected(event) {
+  const f = event.target.files[0];
+  event.target.value = "";
+  if (f) sendFile(f);
+}
+
+async function sendFile(file) {
+  if (!passkey || !channel) return uiAlert("Not connected", "Enter the passkey and wait for the relay to connect.");
+  if (!peerOnline) return uiAlert("Peer is offline", "Files go directly from phone to phone, so both of you need the app open.");
+  if (ft) return uiAlert("Transfer in progress", "Wait for the current file to finish.");
+  if (file.size > FT_MAX) return uiAlert("File too large", "The limit is 50 MB.");
+
+  const t = uid();
+  const msgId = "m_" + uid();
+  const nowTime = getFormattedTime();
+  const burn = disappearingEnabled ? burnDuration : 0;
+  const url = URL.createObjectURL(file);
+  renderBubble(file.name, "you", msgId, nowTime, burn, null, { url, name: file.name, mime: file.type, size: file.size });
+  pending.set(msgId, Date.now());
+
+  const pc = ftNewPeer(t);
+  const dc = pc.createDataChannel("file", { ordered: true });
+  dc.binaryType = "arraybuffer";
+  ft = {
+    t, pc, dc, msgId, role: "send", ice: [],
+    timer: setTimeout(() => { if (ft && ft.t === t && dc.readyState !== "open") ftFail("Could not connect to peer."); }, 20000)
+  };
+  setProgress("CONNECTING…");
+
+  dc.onopen = async () => {
+    try {
+      dc.send(JSON.stringify({ k: "meta", msgId, name: file.name, mime: file.type, size: file.size, timestamp: nowTime, burn }));
+      dc.bufferedAmountLowThreshold = 512 * 1024;
+      let off = 0;
+      while (off < file.size) {
+        if (!ft || ft.t !== t) return;
+        if (dc.bufferedAmount > 1024 * 1024) {
+          await new Promise(r => dc.addEventListener("bufferedamountlow", r, { once: true }));
+        }
+        const buf = await file.slice(off, off + 16384).arrayBuffer();
+        dc.send(buf);
+        off += buf.byteLength;
+        setProgress("SENDING " + Math.round(off / file.size * 100) + "%");
+      }
+    } catch (e) {
+      ftFail("Send error.");
+    }
+  };
+  dc.onmessage = (e) => {
+    if (e.data === "ok") {
+      markDelivered(msgId, true);
+      ftCleanup();
+    }
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  sendCtl({ op: "ft", k: "sdp", t, sdp: pc.localDescription });
+}
+
+async function handleFileSignal(o) {
+  try {
+    if (o.k === "sdp" && o.sdp && o.sdp.type === "offer") {
+      if (ft) ftCleanup();
+      const pc = ftNewPeer(o.t);
+      ft = {
+        t: o.t, pc, role: "recv", chunks: [], bytes: 0, meta: null, ice: [],
+        timer: setTimeout(() => { if (ft && ft.t === o.t && !ft.meta) ftFail("Timed out."); }, 25000)
+      };
+      pc.ondatachannel = (e) => {
+        const dc = e.channel;
+        dc.binaryType = "arraybuffer";
+        if (ft && ft.t === o.t) ft.dc = dc;
+        dc.onmessage = (ev) => ftReceive(dc, ev.data);
+      };
+      await pc.setRemoteDescription(o.sdp);
+      await ftDrain();
+      const ans = await pc.createAnswer();
+      await pc.setLocalDescription(ans);
+      sendCtl({ op: "ft", k: "sdp", t: o.t, sdp: pc.localDescription });
+    } else if (o.k === "sdp") {
+      if (ft && ft.t === o.t && ft.role === "send") {
+        await ft.pc.setRemoteDescription(o.sdp);
+        await ftDrain();
+      }
+    } else if (o.k === "ice") {
+      if (!ft || ft.t !== o.t) return;
+      ft.ice.push(o.c);
+      await ftDrain();
+    }
+  } catch (e) {
+    ftFail("Signalling error.");
+  }
+}
+
+function ftReceive(dc, data) {
+  if (!ft) return;
+  if (typeof data === "string") {
+    try {
+      const j = JSON.parse(data);
+      if (j.k === "meta") {
+        const size = Number(j.size);
+        if (!(size > 0 && size <= FT_MAX) || typeof j.msgId !== "string") return ftFail("Invalid file.");
+        ft.meta = j;
+        ft.meta.size = size;
+        setProgress("RECEIVING " + String(j.name || "file").slice(0, 40) + "…");
+      }
+    } catch (e) {}
+    return;
+  }
+  if (!ft.meta) return;
+  ft.chunks.push(data);
+  ft.bytes += data.byteLength;
+  setProgress("RECEIVING " + Math.min(100, Math.round(ft.bytes / ft.meta.size * 100)) + "%");
+  if (ft.bytes >= ft.meta.size) {
+    const m = ft.meta;
+    const mime = /^[\w.+-]+\/[\w.+-]+$/.test(m.mime || "") ? m.mime : "application/octet-stream";
+    const url = URL.createObjectURL(new Blob(ft.chunks, { type: mime }));
+    const tt = ft.t;
+    try { dc.send("ok"); } catch (e) {}
+    setTimeout(() => { if (ft && ft.t === tt) ftCleanup(); }, 1500);
+    if (!seenIds.has(m.msgId)) {
+      seenIds.add(m.msgId);
+      renderBubble(String(m.name || "file").slice(0, 120), "peer", m.msgId, String(m.timestamp || ""),
+        Number(m.burn) || 0, null, { url, name: String(m.name || "file").slice(0, 120), mime, size: m.size });
+      sendCtl({ op: "ack", id: m.msgId });
+      afterPeerBubble(m.msgId);
+    }
+  }
+}
+
+// =====================================================================
+// SETTINGS, DISAPPEARING MESSAGES, DIALOGS, PURGE, THEMES
+// =====================================================================
 function broadcastConfigSync() {
   if (!passkey) return;
-  const payload = JSON.stringify({
-    enabled: disappearingEnabled,
-    duration: burnDuration
-  });
-  dispatchRaw({
-    type: "config-sync",
-    ciphertext: encrypt(payload),
-    senderId: clientId
-  });
+  sendCtl({ op: "cfg", enabled: disappearingEnabled, duration: burnDuration });
 }
 
 function toggleDisappearingSetting(broadcast) {
   disappearingEnabled = !disappearingEnabled;
-  localStorage.setItem("term_disappearing", disappearingEnabled);
+  lsSet("disappearing", disappearingEnabled);
   updateDisappearingUI();
-
   if (broadcast) {
     broadcastConfigSync();
     logSys(disappearingEnabled
@@ -1186,9 +1329,8 @@ function toggleDisappearingSetting(broadcast) {
 
 function setDisappearingDuration(val, label, broadcast) {
   burnDuration = val;
-  localStorage.setItem("term_burn_duration", burnDuration);
+  lsSet("burn_duration", burnDuration);
   updateDisappearingUI();
-
   if (broadcast) {
     broadcastConfigSync();
     logSys(`YOU SET DISAPPEARING MESSAGES TO ${label}.`);
@@ -1196,106 +1338,50 @@ function setDisappearingDuration(val, label, broadcast) {
 }
 
 function applyRemoteConfig(enabled, duration) {
-  disappearingEnabled = enabled;
-  burnDuration = duration;
-
-  localStorage.setItem("term_disappearing", disappearingEnabled);
-  localStorage.setItem("term_burn_duration", burnDuration);
-
+  disappearingEnabled = !!enabled;
+  burnDuration = parseInt(duration, 10) || 10;
+  lsSet("disappearing", disappearingEnabled);
+  lsSet("burn_duration", burnDuration);
   updateDisappearingUI();
-
   logSys(disappearingEnabled
     ? `PEER SET DISAPPEARING MESSAGES TO ${burnDuration}s.`
     : "PEER TURNED OFF DISAPPEARING MESSAGES.");
 }
 
 function updateDisappearingUI() {
-  const toggleEl = document.getElementById("disappearing-toggle");
-  const masterSub = document.getElementById("disappearing-master-sub");
-  const timerRow = document.getElementById("burn-timer-row");
-  const burnLabel = document.getElementById("current-burn-label");
-
+  const toggleEl = $("disappearing-toggle");
+  const masterSub = $("disappearing-master-sub");
+  const timerRow = $("burn-timer-row");
+  const burnLabel = $("current-burn-label");
   if (burnLabel) burnLabel.innerText = `${burnDuration} Seconds`;
-
   if (disappearingEnabled) {
-    if (toggleEl) toggleEl.classList.add("active");
-    if (masterSub) masterSub.innerText = `On (${burnDuration}s auto-burn)`;
-    if (timerRow) timerRow.classList.remove("disabled");
+    toggleEl.classList.add("active");
+    masterSub.innerText = `On (${burnDuration}s auto-burn)`;
+    timerRow.classList.remove("disabled");
   } else {
-    if (toggleEl) toggleEl.classList.remove("active");
-    if (masterSub) masterSub.innerText = "Off";
-    if (timerRow) timerRow.classList.add("disabled");
-  }
-}
-
-function updateSettingsLabels() {
-  const relayLabel = document.getElementById("current-relay-label");
-  const vaultLabel = document.getElementById("current-vault-label");
-  const themeLabel = document.getElementById("current-theme-label");
-  const fontLabel = document.getElementById("current-font-label");
-  const sizeLabel = document.getElementById("current-size-label");
-
-  const rKey = getStoredApiKey();
-  if (relayLabel) relayLabel.innerText = rKey ? (rKey.length > 12 ? rKey.substring(0, 10) + "..." : rKey) : "Not Configured";
-
-  const vUrl = getStoredVaultUrl();
-  if (vaultLabel) vaultLabel.innerText = vUrl ? "Configured" : "Not Configured";
-
-  if (themeLabel) {
-    const foundTheme = dialogData.theme.options.find(o => o.val === currentTheme);
-    themeLabel.innerText = foundTheme ? foundTheme.label : "Stealth Emerald";
-  }
-
-  if (fontLabel) {
-    const foundFont = dialogData.font.options.find(o => o.val === currentFont);
-    fontLabel.innerText = foundFont ? foundFont.label : "System Modern";
-  }
-
-  if (sizeLabel) sizeLabel.innerText = `${currentFontSize}px`;
-}
-
-function configureRelayKey() {
-  const current = localStorage.getItem("term_relay_key") || "";
-  const input = prompt("Enter your PieSocket Relay Product Key (BYOK):", current);
-  if (input !== null) {
-    localStorage.setItem("term_relay_key", input.trim());
-    updateSettingsLabels();
-  }
-}
-
-function configureVaultUrl() {
-  const current = localStorage.getItem("term_vault_url") || "";
-  const input = prompt("Enter Google Apps Script Offline Vault URL:", current);
-  if (input !== null) {
-    localStorage.setItem("term_vault_url", input.trim());
-    updateSettingsLabels();
+    toggleEl.classList.remove("active");
+    masterSub.innerText = "Off";
+    timerRow.classList.add("disabled");
   }
 }
 
 function openSettings() {
   updateSettingsLabels();
-  document.getElementById("settings-screen").style.display = "flex";
+  $("settings-screen").style.display = "flex";
   history.pushState({ modal: "settings" }, "");
 }
-
 function closeSettings() {
-  document.getElementById("settings-screen").style.display = "none";
-  if (history.state && history.state.modal === "settings") {
-    history.back();
-  }
+  $("settings-screen").style.display = "none";
+  if (history.state && history.state.modal === "settings") history.back();
 }
-
 window.addEventListener("popstate", () => {
-  const settingsScreen = document.getElementById("settings-screen");
-  const selectionModal = document.getElementById("selection-modal");
-
+  const settingsScreen = $("settings-screen");
+  const selectionModal = $("selection-modal");
   if (selectionModal && selectionModal.style.display === "flex") {
     selectionModal.style.display = "none";
     return;
   }
-  if (settingsScreen && settingsScreen.style.display === "flex") {
-    settingsScreen.style.display = "none";
-  }
+  if (settingsScreen && settingsScreen.style.display === "flex") settingsScreen.style.display = "none";
 });
 
 const dialogData = {
@@ -1311,9 +1397,9 @@ const dialogData = {
     current: () => currentTheme,
     onSelect: (val, label) => {
       currentTheme = val;
-      localStorage.setItem("term_theme", currentTheme);
+      lsSet("theme", val);
       setTheme(val);
-      document.getElementById("current-theme-label").innerText = label;
+      $("current-theme-label").innerText = label;
     }
   },
   font: {
@@ -1326,9 +1412,9 @@ const dialogData = {
     current: () => currentFont,
     onSelect: (val, label) => {
       currentFont = val;
-      localStorage.setItem("term_font", currentFont);
+      lsSet("font", val);
       setFont(val);
-      document.getElementById("current-font-label").innerText = label;
+      $("current-font-label").innerText = label;
     }
   },
   fontSize: {
@@ -1340,11 +1426,10 @@ const dialogData = {
       { label: "Extra Large (19px)", val: "19" }
     ],
     current: () => currentFontSize,
-    onSelect: (val, label) => {
+    onSelect: (val) => {
       currentFontSize = val;
-      localStorage.setItem("term_font_size", currentFontSize);
+      lsSet("font_size", val);
       setFontSize(val);
-      document.getElementById("current-size-label").innerText = `${val}px`;
     }
   },
   burn: {
@@ -1356,126 +1441,73 @@ const dialogData = {
       { label: "60 Seconds", val: 60 }
     ],
     current: () => burnDuration,
-    onSelect: (val, label) => {
-      setDisappearingDuration(val, label, true);
-    }
+    onSelect: (val, label) => setDisappearingDuration(val, label, true)
+  },
+  retention: {
+    title: "Keep Undelivered Messages",
+    options: [
+      { label: "1 day", val: 1 },
+      { label: "7 days", val: 7 },
+      { label: "30 days", val: 30 }
+    ],
+    current: () => getVaultDays(),
+    onSelect: (val) => { lsSet("vault_days", val); updateSettingsLabels(); }
   }
 };
 
 function openDialog(type) {
   const config = dialogData[type];
-  document.getElementById("modal-dialog-title").innerText = config.title;
-  const list = document.getElementById("modal-options-list");
+  $("modal-dialog-title").innerText = config.title;
+  const list = $("modal-options-list");
   list.innerHTML = "";
-
   const activeVal = config.current();
-
   config.options.forEach(opt => {
-    const isSelected = opt.val == activeVal;
     const row = document.createElement("div");
     row.className = "dialog-option";
     row.innerHTML = `
-      <div class="os-radio ${isSelected ? 'selected' : ''}">
-        <div class="os-radio-dot"></div>
-      </div>
-      <span>${opt.label}</span>
-    `;
-    row.onclick = () => {
-      config.onSelect(opt.val, opt.label);
-      closeDialog();
-    };
+      <div class="os-radio ${opt.val == activeVal ? "selected" : ""}"><div class="os-radio-dot"></div></div>
+      <span>${escapeHtml(opt.label)}</span>`;
+    row.onclick = () => { config.onSelect(opt.val, opt.label); closeDialog(); };
     list.appendChild(row);
   });
-
-  document.getElementById("selection-modal").style.display = "flex";
+  $("selection-modal").style.display = "flex";
 }
-
-function closeDialog() {
-  document.getElementById("selection-modal").style.display = "none";
-}
+function closeDialog() { $("selection-modal").style.display = "none"; }
 
 async function purgeBothScreens() {
-  if (confirm("Shred chat log on both devices and clear offline vault?")) {
-    stream.innerHTML = "";
-    stream.appendChild(typingIndicator);
-    outbox = [];
-    dispatchRaw({ type: "purge", senderId: clientId });
-
-    const vaultUrl = getStoredVaultUrl();
-    if (vaultUrl && passkey) {
-      fetch(vaultUrl, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain" },
-        body: JSON.stringify({ action: "purge", room: getVaultRoomHash() })
-      }).catch(() => {});
-    }
-
-    closeSettings();
-    logSys("LOCAL & VAULT BUFFERS SHREDDED.");
-  }
+  const ok = await uiConfirm("Shred everything?",
+    "This clears the chat on both phones and empties the offline vault. It cannot be undone.",
+    "Shred", true);
+  if (!ok) return;
+  wipeLocal();
+  sendCtl({ op: "purge" });
+  if (getStoredVaultUrl() && passkey) vaultCall({ action: "purge" });
+  closeSettings();
+  logSys("LOCAL & VAULT BUFFERS SHREDDED.");
 }
 
+const THEME_VARS = ["--bg", "--panel-bg", "--card-bg", "--card-border", "--dialog-bg", "--you-bubble", "--peer-bubble", "--accent"];
+const THEMES = {
+  stealth:  ["#090a0f", "#0e1015", "#161922", "#212631", "#1c202a", "#005c4b", "#1a222d", "#00a884"],
+  matrix:   ["#050b07", "#09140c", "#102115", "#1b3824", "#14281a", "#133b1e", "#0f2015", "#22c55e"],
+  oled:     ["#000000", "#080808", "#121212", "#1f1f1f", "#171717", "#262626", "#161616", "#ffffff"],
+  charcoal: ["#121316", "#17181c", "#202227", "#2e3138", "#25272e", "#2d3748", "#1a202c", "#38bdf8"],
+  amber:    ["#0e0905", "#150e08", "#20160d", "#362516", "#2a1c10", "#3d2708", "#211606", "#f59e0b"]
+};
 function setTheme(t) {
-  const r = document.documentElement;
-  if (t === "stealth") {
-    r.style.setProperty("--bg", "#090a0f");
-    r.style.setProperty("--panel-bg", "#0e1015");
-    r.style.setProperty("--card-bg", "#161922");
-    r.style.setProperty("--card-border", "#212631");
-    r.style.setProperty("--dialog-bg", "#1c202a");
-    r.style.setProperty("--you-bubble", "#005c4b");
-    r.style.setProperty("--peer-bubble", "#1a222d");
-    r.style.setProperty("--accent", "#00a884");
-  } else if (t === "matrix") {
-    r.style.setProperty("--bg", "#050b07");
-    r.style.setProperty("--panel-bg", "#09140c");
-    r.style.setProperty("--card-bg", "#102115");
-    r.style.setProperty("--card-border", "#1b3824");
-    r.style.setProperty("--dialog-bg", "#14281a");
-    r.style.setProperty("--you-bubble", "#133b1e");
-    r.style.setProperty("--peer-bubble", "#0f2015");
-    r.style.setProperty("--accent", "#22c55e");
-  } else if (t === "oled") {
-    r.style.setProperty("--bg", "#000000");
-    r.style.setProperty("--panel-bg", "#080808");
-    r.style.setProperty("--card-bg", "#121212");
-    r.style.setProperty("--card-border", "#1f1f1f");
-    r.style.setProperty("--dialog-bg", "#171717");
-    r.style.setProperty("--you-bubble", "#262626");
-    r.style.setProperty("--peer-bubble", "#161616");
-    r.style.setProperty("--accent", "#ffffff");
-  } else if (t === "charcoal") {
-    r.style.setProperty("--bg", "#121316");
-    r.style.setProperty("--panel-bg", "#17181c");
-    r.style.setProperty("--card-bg", "#202227");
-    r.style.setProperty("--card-border", "#2e3138");
-    r.style.setProperty("--dialog-bg", "#25272e");
-    r.style.setProperty("--you-bubble", "#2d3748");
-    r.style.setProperty("--peer-bubble", "#1a202c");
-    r.style.setProperty("--accent", "#38bdf8");
-  } else if (t === "amber") {
-    r.style.setProperty("--bg", "#0e0905");
-    r.style.setProperty("--panel-bg", "#150e08");
-    r.style.setProperty("--card-bg", "#20160d");
-    r.style.setProperty("--card-border", "#362516");
-    r.style.setProperty("--dialog-bg", "#2a1c10");
-    r.style.setProperty("--you-bubble", "#3d2708");
-    r.style.setProperty("--peer-bubble", "#211606");
-    r.style.setProperty("--accent", "#f59e0b");
-  }
+  const v = THEMES[t] || THEMES.stealth;
+  THEME_VARS.forEach((n, i) => document.documentElement.style.setProperty(n, v[i]));
 }
-
 function setFont(f) {
   const fonts = {
     sans: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans Devanagari", "Devanagari MT", Helvetica, Arial, sans-serif',
     mono: '"Courier New", Courier, monospace',
     serif: 'Georgia, Cambria, "Times New Roman", serif'
   };
-  document.documentElement.style.setProperty("--font-stack", fonts[f]);
+  document.documentElement.style.setProperty("--font-stack", fonts[f] || fonts.sans);
 }
-
 function setFontSize(sz) {
   document.documentElement.style.setProperty("--font-size", sz + "px");
-  const label = document.getElementById("current-size-label");
+  const label = $("current-size-label");
   if (label) label.innerText = `${sz}px`;
 }
