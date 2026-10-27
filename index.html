@@ -27,7 +27,7 @@
       </div>
     </div>
     <div class="header-actions">
-      <!-- Speaker Mute/Unmute -->
+      <!-- PUBG Style Speaker Mute/Unmute -->
       <button class="action-btn" id="speaker-toggle-btn" title="Speaker On/Off" onclick="toggleSpeaker()">
         <svg viewBox="0 0 24 24">
           <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
@@ -36,7 +36,7 @@
         </svg>
       </button>
 
-      <!-- Live Mic Push/Toggle -->
+      <!-- PUBG Style Live Mic Push/Toggle -->
       <button class="action-btn" id="mic-toggle-btn" title="Mic On/Off" onclick="toggleMic()">
         <svg viewBox="0 0 24 24">
           <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
@@ -91,7 +91,7 @@
       <span class="reaction-emoji" onclick="selectReaction('🙏')">🙏</span>
     </div>
 
-    <!-- Context Action Dropdown Menu -->
+    <!-- WhatsApp Context Action Dropdown Menu -->
     <div id="msg-context-menu">
       <div class="context-item" onclick="triggerContextAction('reply')">
         <span>↩️</span><span>Reply</span>
@@ -104,7 +104,7 @@
       </div>
     </div>
 
-    <!-- 3-Dots Typing Indicator -->
+    <!-- Bouncing WhatsApp 3-Dots Typing Indicator -->
     <div class="typing-bubble-wrap" id="typing-indicator">
       <div class="typing-bubble">
         <div class="typing-dot"></div>
@@ -126,7 +126,7 @@
   <!-- Expanding Bottom Input Bar -->
   <footer id="input-bar">
     <div class="input-pill">
-      <button class="smiley-btn" type="button" onclick="toggleEmojiTray()">
+      <button class="smiley-btn" type="button" onclick="triggerNativeEmojiKeyboard()">
         <svg viewBox="0 0 24 24">
           <circle cx="12" cy="12" r="10"></circle>
           <path d="M8 14s1.5 2 4 2 4-2 4-2"></path>
@@ -148,38 +148,6 @@
       </svg>
     </button>
   </footer>
-
-  <!-- Fast In-App Emoji Drawer -->
-  <div id="emoji-tray" class="emoji-tray-hidden">
-    <div class="emoji-grid">
-      <span onclick="insertEmoji('😀')">😀</span><span onclick="insertEmoji('😂')">😂</span>
-      <span onclick="insertEmoji('😍')">😍</span><span onclick="insertEmoji('😎')">😎</span>
-      <span onclick="insertEmoji('🔥')">🔥</span><span onclick="insertEmoji('👍')">👍</span>
-      <span onclick="insertEmoji('🙏')">🙏</span><span onclick="insertEmoji('🎉')">🎉</span>
-      <span onclick="insertEmoji('💯')">💯</span><span onclick="insertEmoji('🚀')">🚀</span>
-      <span onclick="insertEmoji('⚡')">⚡</span><span onclick="insertEmoji('🔒')">🔒</span>
-      <span onclick="insertEmoji('💀')">💀</span><span onclick="insertEmoji('🤫')">🤫</span>
-      <span onclick="insertEmoji('👀')">👀</span><span onclick="insertEmoji('❤️')">❤️</span>
-    </div>
-  </div>
-</div>
-
-<!-- WebRTC Call Stage Overlay -->
-<div id="call-box" class="call-modal-hidden">
-  <div class="call-header">
-    <div id="call-status">P2P ENCRYPTED CALL</div>
-  </div>
-  <div class="video-stage">
-    <video id="call-remote-video" autoplay playsinline></video>
-    <video id="call-local-video" autoplay playsinline muted></video>
-  </div>
-  <div class="call-controls">
-    <button class="call-end-btn" onclick="hangUpCall()">
-      <svg viewBox="0 0 24 24" width="28" height="28" fill="#fff">
-        <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.996.996 0 0 1 0-1.41C3.28 8.78 7.42 7 12 7s8.72 1.78 11.71 4.67c.39.39.39 1.02 0 1.41l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.11-.7-.28-.79-.74-1.69-1.36-2.67-1.85-.33-.16-.56-.5-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/>
-      </svg>
-    </button>
-  </div>
 </div>
 
 <!-- Native Settings Screen -->
@@ -325,14 +293,14 @@
 <!-- Passkey Modal -->
 <div id="passkey-dialog" class="passkey-dialog-overlay">
   <div class="passkey-box">
-    <div style="font-weight: 600; font-size: 16px; color: var(--text-main, #fff); text-align: center;">Session Authentication</div>
-    <div style="font-size: 12px; color: #9ca3af; text-align: center; margin-top: 4px;">Enter shared passkey to mount volatile RAM:</div>
+    <div style="font-weight: 600; font-size: 16px; color: var(--text-main); text-align: center;">Session Authentication</div>
+    <div style="font-size: 12px; color: var(--text-dim); text-align: center;">Enter shared passkey to mount volatile RAM:</div>
     <input type="tel" id="numeric-key" class="passkey-input" inputmode="numeric" maxlength="12" placeholder="••••" autofocus />
     <button class="passkey-btn" onclick="mountSession()">AUTHENTICATE</button>
   </div>
 </div>
 
-<!-- Scripts -->
+<!-- Modular Scripts -->
 <script src="js/config.js"></script>
 <script src="js/app.js"></script>
 
