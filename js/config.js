@@ -35,7 +35,7 @@ function updateSettingsLabels() {
   set("current-vault-label", v ? "Connected (Script Vault)" : "Not Configured");
   const d = getVaultDays();
   set("current-retention-label", d === 1 ? "1 day" : `${d} days`);
-  set("current-turn-label", t && t.url ? "Configured" : "Not set (Wi-Fi calls only)");
+  set("current-turn-label", t && t.url ? "Configured" : "Not set");
 }
 
 async function configureRelayKey() {
