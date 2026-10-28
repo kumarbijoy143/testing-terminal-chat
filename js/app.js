@@ -26,6 +26,7 @@ let currentFontSize = lsGet("font_size", "15");
 
 let outbox = [];                 // only used when no vault is configured
 const pending = new Map();       // sent but not yet delivered: msgId -> sent time
+const sent = new Map();          // text of messages I sent (needed to replace an undelivered one on edit)
 const seenIds = new Set();       // every message already shown (stops duplicates)
 const unread = new Set();        // peer messages that arrived while app was in background
 let appActive = document.visibilityState === "visible";
@@ -184,8 +185,11 @@ window.addEventListener("DOMContentLoaded", () => {
   updateDisappearingUI();
   updateSettingsLabels();
 
-  const sub = document.querySelector(".header-sub");
-  if (sub) sub.innerText = "END-TO-END ENCRYPTED";
+  // Tapping a link inside a message asks first, then opens it.
+  stream.addEventListener("click", (e) => {
+    const a = e.target.closest && e.target.closest(".msg-link");
+    if (a) { e.preventDefault(); openLink(a.dataset.u); }
+  });
 
   // Ask the browser to keep saved settings (key, vault link) permanently.
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
@@ -213,7 +217,7 @@ function injectUi() {
   card.appendChild(mkRow('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
     "Keep Undelivered Messages", "current-retention-label", "7 days", () => openDialog("retention")));
   card.appendChild(mkRow('<path d="M5 12h14"/><path d="M12 5l7 7-7 7"/>',
-    "Call Relay (TURN)", "current-turn-label", "Not set (Wi-Fi calls only)", configureTurn));
+    "Call Relay (TURN)", "current-turn-label", "Not set", configureTurn));
 
   const cs = document.createElement("div");
   cs.id = "call-screen";
@@ -239,13 +243,35 @@ function panicExit() {
   outbox = [];
   pending.clear();
   passkey = "";
+  keys = null;
   if (window.history.length > 1) window.history.back();
   else window.location.reload();
 }
 
-function mountSession() {
+let mounting = false;
+async function mountSession() {
+  if (mounting) return;
   const val = $("numeric-key").value.trim();
   if (!val) return;
+
+  mounting = true;
+  const btn = document.querySelector(".passkey-btn");
+  const oldLabel = btn.innerText;
+  btn.innerText = "AUTHENTICATING…";
+  btn.disabled = true;
+  try {
+    keys = await deriveKeys(val);
+  } catch (e) {
+    btn.innerText = oldLabel;
+    btn.disabled = false;
+    mounting = false;
+    return uiAlert("Secure crypto unavailable",
+      "This browser can't run the secure key function. Open the app from its https link.");
+  }
+  mounting = false;
+  btn.innerText = oldLabel;
+  btn.disabled = false;
+
   passkey = val;
   $("passkey-dialog").style.display = "none";
   setTimeout(() => msgInput.focus(), 100);
@@ -266,12 +292,45 @@ function mountSession() {
 // =====================================================================
 // ENCRYPTION + TRANSPORT
 // =====================================================================
-function encrypt(text) {
-  return CryptoJS.AES.encrypt(text, passkey).toString();
+// Passkey -> strong keys: PBKDF2 (200,000 rounds, SHA-256) gives 64 bytes that are
+// split into the AES-GCM key, the relay channel name and the vault room name.
+const te = new TextEncoder();
+let keys = null;
+const hex = (a) => Array.from(a, b => b.toString(16).padStart(2, "0")).join("");
+function b64(buf) {
+  const a = new Uint8Array(buf);
+  let s = "";
+  for (let i = 0; i < a.length; i += 0x8000) s += String.fromCharCode.apply(null, a.subarray(i, i + 0x8000));
+  return btoa(s);
 }
-function decrypt(cipher) {
+function unb64(str) {
+  const s = atob(str);
+  const a = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i);
+  return a;
+}
+async function deriveKeys(pass) {
+  if (!(window.crypto && crypto.subtle)) throw new Error("no-subtle");
+  const base = await crypto.subtle.importKey("raw", te.encode(pass), "PBKDF2", false, ["deriveBits"]);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: te.encode("terminal-console-v2"), iterations: 200000, hash: "SHA-256" }, base, 512));
+  const aes = await crypto.subtle.importKey("raw", bits.slice(0, 32), "AES-GCM", false, ["encrypt", "decrypt"]);
+  return { aes, chan: hex(bits.slice(32, 48)), room: hex(bits.slice(48, 64)) };
+}
+// AES-GCM also detects tampering. Output: base64( 12-byte random IV + ciphertext ).
+async function encrypt(text) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, keys.aes, te.encode(text)));
+  const out = new Uint8Array(12 + ct.length);
+  out.set(iv);
+  out.set(ct, 12);
+  return b64(out);
+}
+async function decrypt(cipher) {
   try {
-    return CryptoJS.AES.decrypt(cipher, passkey).toString(CryptoJS.enc.Utf8);
+    const raw = unb64(cipher);
+    const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: raw.slice(0, 12) }, keys.aes, raw.slice(12));
+    return new TextDecoder().decode(pt);
   } catch (e) {
     return null;
   }
@@ -283,8 +342,14 @@ function dispatchRaw(dataObj) {
   else if (typeof channel.send === "function") channel.send(jsonStr);
 }
 // Every command is encrypted, so only someone with the passkey can send one.
+let sendChain = Promise.resolve();   // keeps commands in the order they were issued
 function sendCtl(obj) {
-  dispatchRaw({ type: "ctl", c: encrypt(JSON.stringify(obj)), senderId: clientId });
+  sendChain = sendChain.then(async () => {
+    if (!keys) return;
+    const c = await encrypt(JSON.stringify(obj));
+    dispatchRaw({ type: "ctl", c, senderId: clientId });
+  }).catch(() => {});
+  return sendChain;
 }
 
 function initRelay() {
@@ -303,7 +368,7 @@ function initRelay() {
       return;
     }
     const piesocket = new PS({ clusterId: PIESOCKET_CLUSTER_ID, apiKey: apiKey, notifySelf: false });
-    const dynamicChannel = "ch_" + CryptoJS.SHA256(passkey + "_terminal_salt").toString().substr(0, 16);
+    const dynamicChannel = "ch_" + keys.chan;
     const subResult = piesocket.subscribe(dynamicChannel);
     if (subResult && typeof subResult.then === "function") {
       subResult.then((ch) => setupChannel(ch)).catch(() => {
@@ -370,13 +435,16 @@ function handlePacket(raw) {
       return;
     }
     if (pkg.type === "ctl") {
-      const plain = decrypt(pkg.c);
-      if (!plain) return;
-      refreshPeerWatchdog();
-      handleCtl(JSON.parse(plain));
+      recvChain = recvChain.then(async () => {
+        const plain = await decrypt(pkg.c);
+        if (!plain) return;
+        refreshPeerWatchdog();
+        handleCtl(JSON.parse(plain));
+      }).catch(() => {});
     }
   } catch (e) {}
 }
+let recvChain = Promise.resolve();
 
 function handleCtl(o) {
   switch (o.op) {
@@ -415,7 +483,7 @@ function handlePeerTyping(isTyping) {
 // OFFLINE VAULT (messages wait here until delivered)
 // =====================================================================
 function getVaultRoomHash() {
-  return "v_" + CryptoJS.SHA256(passkey + "_universal_vault_salt").toString().substr(0, 28);
+  return "v_" + keys.room;
 }
 
 async function vaultCall(body) {
@@ -438,7 +506,7 @@ async function storeInVault(m) {
     action: "store",
     msgId: m.msgId,
     from: clientId,
-    envelope: encrypt(JSON.stringify(m)),
+    envelope: await encrypt(JSON.stringify(m)),
     ttlDays: getVaultDays()
   });
   if (r && r.status === "stored") return true;
@@ -467,11 +535,16 @@ async function syncVault() {
     for (const item of r.messages) {
       let m = null;
       try {
-        const p = decrypt(item.envelope);
+        const p = await decrypt(item.envelope);
         if (p) m = JSON.parse(p);
       } catch (e) {}
       if (!m) continue;
       if (m.senderId === clientId) { own.add(item.id); continue; }
+      if (m.edit) {                       // an edit that was saved while we were away
+        applyRemoteEdit(String(m.target || ""), String(m.text || ""));
+        del.push(item.id);
+        continue;
+      }
       if (receiveMessage(m)) fresh++;
       del.push(item.id);
     }
@@ -510,8 +583,20 @@ async function sendMessage() {
   dispatchRaw({ type: "typing", status: false, senderId: clientId });
 
   if (editingTargetMsgId) {
-    applyLocalEdit(editingTargetMsgId, text);
-    sendCtl({ op: "edit", id: editingTargetMsgId, text });
+    const editId = editingTargetMsgId;
+    applyLocalEdit(editId, text);
+    sendCtl({ op: "edit", id: editId, text });
+    if (getStoredVaultUrl()) {
+      const original = sent.get(editId);
+      if (original && pending.has(editId)) {
+        // Not delivered yet: replace the waiting copy so the peer receives the edited text.
+        original.text = text;
+        storeInVault(original);
+      } else {
+        // Already delivered: leave a small edit note for a phone that missed the live one.
+        storeInVault({ msgId: "e_" + uid(), edit: true, target: editId, text, senderId: clientId });
+      }
+    }
     msgInput.value = "";
     msgInput.style.height = "auto";
     cancelReplyOrEdit();
@@ -535,6 +620,7 @@ async function sendMessage() {
 
   const bubble = renderBubble(m.text, "you", m.msgId, m.timestamp, m.burn, m.reply);
   pending.set(m.msgId, Date.now());
+  sent.set(m.msgId, m);
   sendCtl({ op: "chat", m });   // instant path when the peer is online
 
   if (getStoredVaultUrl()) {
@@ -652,6 +738,51 @@ function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, m =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[m]));
 }
+// Turns http(s) links into tappable links. Everything else stays escaped text.
+function linkify(text) {
+  text = String(text || "");
+  const re = /https?:\/\/[^\s<>"']+/gi;
+  let out = "", last = 0, m;
+  while ((m = re.exec(text))) {
+    let url = m[0];
+    const trail = url.match(/[.,;:!?)\]]+$/);
+    if (trail) url = url.slice(0, -trail[0].length);
+    out += escapeHtml(text.slice(last, m.index));
+    out += `<a class="msg-link" href="#" data-u="${escapeHtml(url)}">${escapeHtml(url)}</a>`;
+    last = m.index + url.length;
+    re.lastIndex = last;
+  }
+  return out + escapeHtml(text.slice(last));
+}
+
+async function openLink(u) {
+  let url;
+  try { url = new URL(u); } catch (e) { return; }
+  if (!/^https?:$/.test(url.protocol)) return;
+  const ok = await uiConfirm("Open this link?", url.hostname + "\n\n" + url.href, "Open");
+  if (!ok) return;
+  if (window.AndroidBridge && typeof window.AndroidBridge.openLink === "function") {
+    window.AndroidBridge.openLink(url.href);   // in-app browser, if the wrapper supports it
+  } else {
+    window.open(url.href, "_blank", "noopener");
+  }
+}
+
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).catch(() => {});
+    return;
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); } catch (e) {}
+  ta.remove();
+}
+
 function fmtSize(n) {
   n = Number(n) || 0;
   if (n < 1024) return n + " B";
@@ -682,7 +813,8 @@ function renderBubble(text, role, msgId, timeStr, burnSecs, replyData, fileData)
       ${escapeHtml(replyData.text)}
     </div>` : "";
 
-  const textBodyHtml = isImg ? "" : `<span class="msg-text">${escapeHtml(text)}</span>`;
+  const textBodyHtml = isImg ? "" : `<span class="msg-text">${linkify(text)}</span>`;
+  wrap.dataset.kind = fileData ? "file" : "text";
   const ticksHtml = role === "you" ? '<span class="ticks">✓</span>' : "";
 
   wrap.innerHTML = `
@@ -738,15 +870,25 @@ function logSys(msg) {
 // =====================================================================
 // BUBBLE GESTURES, REPLY, EDIT, REACTIONS
 // =====================================================================
+// The text as currently shown (it changes after an edit).
+function liveText(wrap, fallback) {
+  const n = wrap.querySelector(".msg-text");
+  return n ? n.innerText : fallback;
+}
+
 function setupBubbleInteractions(wrap, text, role) {
   let startX = 0, currentX = 0, isSwiping = false, longPressTimer = null;
   const swipeIcon = wrap.querySelector(".swipe-reply-icon");
+
+  // Never let a long press select the words inside a bubble.
+  wrap.addEventListener("contextmenu", (e) => e.preventDefault());
+  wrap.addEventListener("selectstart", (e) => e.preventDefault());
 
   wrap.addEventListener("touchstart", (e) => {
     startX = e.touches[0].clientX;
     isSwiping = false;
     longPressTimer = setTimeout(() => {
-      if (!isSwiping) openClampedContextMenu(wrap, text, role);
+      if (!isSwiping) openClampedContextMenu(wrap, liveText(wrap, text), role);
     }, 450);
   }, { passive: true });
 
@@ -767,7 +909,7 @@ function setupBubbleInteractions(wrap, text, role) {
     const diffX = currentX - startX;
     if (isSwiping && diffX >= 50) {
       if (navigator.vibrate) navigator.vibrate(12);
-      setReplyTarget(text, role === "you" ? "You" : "Peer");
+      setReplyTarget(liveText(wrap, text), role === "you" ? "You" : "Peer");
     }
     wrap.style.transform = "translateX(0px)";
     if (swipeIcon) swipeIcon.style.opacity = 0;
@@ -777,11 +919,17 @@ function setupBubbleInteractions(wrap, text, role) {
   });
 }
 
+let ctxOpenedAt = 0;
+
+// Long press: highlight the message and show only the reactions plus a ⋮ button.
 function openClampedContextMenu(bubbleWrap, text, role) {
-  activeContextTarget = { wrap: bubbleWrap, text, role, id: bubbleWrap.id };
+  hideContext();
+  activeContextTarget = { wrap: bubbleWrap, text, role, id: bubbleWrap.id, menuTop: 0, menuLeft: 0 };
+  bubbleWrap.classList.add("msg-selected");
+
   const dock = $("reaction-dock");
-  const menu = $("msg-context-menu");
-  $("context-edit-item").style.display = role === "you" ? "flex" : "none";
+  const canEdit = role === "you" && bubbleWrap.dataset.kind !== "file";
+  $("context-edit-item").style.display = canEdit ? "flex" : "none";
 
   const rect = bubbleWrap.getBoundingClientRect();
   const streamRect = stream.getBoundingClientRect();
@@ -789,50 +937,61 @@ function openClampedContextMenu(bubbleWrap, text, role) {
   const isNearTop = (rect.top - streamRect.top) < 65;
 
   const dockTop = isNearTop ? (rect.bottom - streamRect.top + 8) : (rect.top - streamRect.top - 46);
-  const menuTop = isNearTop ? (dockTop + 48) : (rect.bottom - streamRect.top + 6);
   const dockLeft = role === "you"
-    ? Math.max(12, screenWidth - 280)
-    : Math.min(screenWidth - 280, Math.max(12, rect.left - streamRect.left));
-  const menuLeft = role === "you"
+    ? Math.max(12, screenWidth - 300)
+    : Math.min(screenWidth - 300, Math.max(12, rect.left - streamRect.left));
+
+  activeContextTarget.menuTop = isNearTop ? (dockTop + 48) : (rect.bottom - streamRect.top + 6);
+  activeContextTarget.menuLeft = role === "you"
     ? Math.max(12, screenWidth - 170)
     : Math.max(12, rect.left - streamRect.left);
 
   dock.style.top = `${dockTop}px`;
   dock.style.left = `${dockLeft}px`;
   dock.style.display = "flex";
-  menu.style.top = `${menuTop}px`;
-  menu.style.left = `${menuLeft}px`;
-  menu.style.display = "flex";
+  $("msg-context-menu").style.display = "none";
   if (navigator.vibrate) navigator.vibrate(15);
 
+  ctxOpenedAt = Date.now();
   setTimeout(() => {
-    document.addEventListener("click", closeContextModals);
-    document.addEventListener("touchstart", closeContextModals);
+    document.addEventListener("click", ctxOutside);
+    document.addEventListener("touchstart", ctxOutside);
   }, 100);
 }
 
-function closeContextModals(e) {
-  const dock = $("reaction-dock");
+// ⋮ button: show Copy / Reply / Edit under the message.
+function openMoreMenu() {
+  if (!activeContextTarget) return;
   const menu = $("msg-context-menu");
-  if (!dock.contains(e.target) && !menu.contains(e.target)) {
-    dock.style.display = "none";
-    menu.style.display = "none";
-    document.removeEventListener("click", closeContextModals);
-    document.removeEventListener("touchstart", closeContextModals);
-  }
+  menu.style.top = `${activeContextTarget.menuTop}px`;
+  menu.style.left = `${activeContextTarget.menuLeft}px`;
+  menu.style.display = "flex";
+}
+
+function hideContext() {
+  $("reaction-dock").style.display = "none";
+  $("msg-context-menu").style.display = "none";
+  if (activeContextTarget && activeContextTarget.wrap) activeContextTarget.wrap.classList.remove("msg-selected");
+  document.removeEventListener("click", ctxOutside);
+  document.removeEventListener("touchstart", ctxOutside);
+}
+
+function ctxOutside(e) {
+  if (Date.now() - ctxOpenedAt < 400) return;   // ignore the finger lifting after the long press
+  if (!$("reaction-dock").contains(e.target) && !$("msg-context-menu").contains(e.target)) hideContext();
 }
 
 function triggerContextAction(action) {
   if (!activeContextTarget) return;
+  const t = activeContextTarget;
   if (action === "reply") {
-    setReplyTarget(activeContextTarget.text, activeContextTarget.role === "you" ? "You" : "Peer");
+    setReplyTarget(t.text, t.role === "you" ? "You" : "Peer");
   } else if (action === "copy") {
-    navigator.clipboard?.writeText(activeContextTarget.text);
+    copyText(t.text);
   } else if (action === "edit") {
-    startEditMessage(activeContextTarget.id, activeContextTarget.text);
+    startEditMessage(t.id, t.text);
   }
-  $("reaction-dock").style.display = "none";
-  $("msg-context-menu").style.display = "none";
+  hideContext();
 }
 
 function startEditMessage(msgId, currentText) {
@@ -850,7 +1009,7 @@ function applyLocalEdit(msgId, newText) {
   const wrap = $(msgId);
   if (wrap) {
     const node = wrap.querySelector(".msg-text");
-    if (node) node.innerText = newText;
+    if (node) node.innerHTML = linkify(newText);
     addEditedBadge(wrap);
   }
 }
@@ -858,7 +1017,7 @@ function applyRemoteEdit(msgId, newText) {
   const wrap = $(msgId);
   if (wrap && wrap.dataset.role === "peer") {   // a peer can only edit its own messages
     const node = wrap.querySelector(".msg-text");
-    if (node) node.innerText = newText;
+    if (node) node.innerHTML = linkify(newText);
     addEditedBadge(wrap);
   }
 }
@@ -890,8 +1049,7 @@ function selectReaction(emoji) {
   if (!activeContextTarget) return;
   applyReactionToBubble(activeContextTarget.id, emoji);
   sendCtl({ op: "react", id: activeContextTarget.id, emoji });
-  $("reaction-dock").style.display = "none";
-  $("msg-context-menu").style.display = "none";
+  hideContext();
 }
 function applyReactionToBubble(msgId, emoji) {
   const wrap = $(msgId);
