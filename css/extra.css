@@ -103,3 +103,65 @@
 .call-btn.end { background: #ef4444; border: none; }
 .call-btn.accept { background: #22c55e; border: none; color: #06210f; }
 .call-btn[hidden] { display: none; }
+
+/* ---------- Message selection: no text highlighting, WhatsApp-style highlight ---------- */
+.msg-wrap, .msg-wrap * {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+.msg-wrap.msg-selected .bubble {
+  box-shadow: 0 0 0 2px var(--accent), 0 1px 1.5px rgba(0, 0, 0, 0.3);
+}
+.reaction-more {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-dim);
+  padding: 0 2px 0 6px;
+  border-left: 1px solid var(--card-border);
+  cursor: pointer;
+}
+
+/* ---------- Links inside messages ---------- */
+.msg-link {
+  color: #53bdeb;
+  text-decoration: underline;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Header: status always stays on one line ---------- */
+header { flex-wrap: nowrap; }
+.header-left { flex: 1 1 auto; min-width: 0; }
+.header-info { flex: 1 1 auto; min-width: 0; overflow: hidden; }
+.header-title, .header-sub {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.header-title { font-size: 12.5px; }
+.header-actions { gap: 0; }
+.action-btn { padding: 5px; }
+
+/* ---------- Settings screen: rows never get squashed or cut off ---------- */
+.settings-body, .settings-body > *, .os-card { flex-shrink: 0; }
+.row-content { min-width: 0; }
+.row-subtitle {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- Popups: scroll when taller than the screen ---------- */
+.os-modal-overlay { overflow-y: auto; }
+.os-dialog {
+  max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.passkey-box {
+  max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
+}
+.dialog-text { overflow-wrap: anywhere; }
