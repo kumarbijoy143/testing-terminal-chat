@@ -232,8 +232,14 @@ function injectUi() {
       <button class="call-btn" id="call-cam" onclick="toggleCam()">Camera</button>
       <button class="call-btn" id="call-spk" onclick="toggleSpeaker()">Speaker</button>
       <button class="call-btn accept" id="call-accept" onclick="acceptCall()">Accept</button>
+      <button class="call-btn" id="call-ext" onclick="switchToBrowser()" hidden>Browser</button>
       <button class="call-btn end" id="call-end" onclick="hangUp()">End</button>
     </div>`;
+  const hint = document.createElement("div");
+  hint.id = "vdo-hint";
+  hint.hidden = true;
+  hint.textContent = "Can't see or hear them? Tap Browser.";
+  cs.appendChild(hint);
   document.body.appendChild(cs);
 }
 
@@ -279,6 +285,7 @@ async function mountSession() {
 
   initRelay();
   syncVault();
+
   lsSet("setup_done", "1");
 }
 
@@ -725,17 +732,27 @@ function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, m =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[m]));
 }
-// Turns http(s) links into tappable links. Everything else stays escaped text.
+// Turns links (with or without https://) into tappable links. Everything else stays escaped text.
+const LINK_TLDS = "com|net|org|in|io|co|app|dev|me|info|gov|edu|ly|tv|xyz|online|site|live|ai|us|uk|ca|au|de|fr|jp|ru|be|ch|fm|gg|to|so|link|page|store|shop|tech|cloud|club|blog|news|bio";
+const LINK_RE_SRC =
+  "https?:\\/\\/[^\\s<>\"']+" +
+  "|www\\.[^\\s<>\"']+" +
+  "|(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+(?:" + LINK_TLDS + ")(?![a-z0-9-])(?::\\d{2,5})?(?:[\\/?#][^\\s<>\"']*)?";
 function linkify(text) {
   text = String(text || "");
-  const re = /https?:\/\/[^\s<>"']+/gi;
+  const re = new RegExp(LINK_RE_SRC, "gi");
   let out = "", last = 0, m;
   while ((m = re.exec(text))) {
     let url = m[0];
+    const hasScheme = /^https?:\/\//i.test(url);
+    const prev = m.index > 0 ? text.charAt(m.index - 1) : "";
+    if (!hasScheme && prev && /[@\w.\/-]/.test(prev)) continue;   // emails, parts of longer words
     const trail = url.match(/[.,;:!?)\]]+$/);
     if (trail) url = url.slice(0, -trail[0].length);
+    if (!url) continue;
+    const href = hasScheme ? url : "https://" + url;
     out += escapeHtml(text.slice(last, m.index));
-    out += `<a class="msg-link" href="#" data-u="${escapeHtml(url)}">${escapeHtml(url)}</a>`;
+    out += `<a class="msg-link" href="#" data-u="${escapeHtml(href)}">${escapeHtml(url)}</a>`;
     last = m.index + url.length;
     re.lastIndex = last;
   }
@@ -1048,7 +1065,7 @@ function applyReactionToBubble(msgId, emoji) {
 // =====================================================================
 // CALLS (voice + video) over WebRTC
 // =====================================================================
-const call = { state: "idle", video: false, pc: null, local: null, ice: [], timer: null, tick: null, t0: 0, micOn: true, camOn: true };
+const call = { state: "idle", video: false, pc: null, local: null, ice: [], timer: null, tick: null, t0: 0, micOn: true, camOn: true, room: "", pw: "", hint: null };
 
 function getIceServers() {
   const list = [{ urls: "stun:stun.l.google.com:19302" }];
@@ -1065,9 +1082,10 @@ function callUI(show, title, sub, mode) {
   $("call-title").innerText = title;
   $("call-sub").innerText = sub || "";
   $("call-accept").hidden = mode !== "ringing";
-  $("call-mic").hidden = mode === "ringing";
-  $("call-spk").hidden = mode === "ringing";
-  $("call-cam").hidden = mode === "ringing" || !call.video;
+  const v = !!call.room;
+  $("call-mic").hidden = mode === "ringing" || v;
+  $("call-spk").hidden = mode === "ringing" || v;
+  $("call-cam").hidden = mode === "ringing" || v || !call.video;
   $("call-end").innerText = mode === "ringing" ? "Decline" : "End";
   refreshCallButtons();
 }
@@ -1100,38 +1118,107 @@ async function startCall(video) {
   if (!passkey || !channel || !peerOnline) {
     return uiAlert("Peer is offline", "Calls need both phones online with the app open.");
   }
-  try {
-    call.local = await getMedia(video);
-  } catch (e) {
-    return uiAlert("Permission needed", "Microphone" + (video ? " and camera" : "") + " access was blocked.");
-  }
   call.state = "calling";
   call.video = video;
   call.micOn = true;
   call.camOn = true;
-  showLocal();
+  call.room = "c" + uid() + uid();
+  call.pw = uid() + uid();
   callUI(true, "Calling…", video ? "Video call" : "Voice call", "calling");
-  sendCtl({ op: "call", k: "invite", video });
+  sendCtl({ op: "call", k: "invite", video, room: call.room, pw: call.pw });
   call.timer = setTimeout(() => { if (call.state === "calling") endCall("NO ANSWER", true); }, 45000);
 }
 
 async function acceptCall() {
   if (call.state !== "ringing") return;
   clearTimeout(call.timer);
-  try {
-    call.local = await getMedia(call.video);
-  } catch (e) {
-    sendCtl({ op: "call", k: "decline" });
-    call.state = "idle";
-    callUI(false);
-    return uiAlert("Permission needed", "Microphone" + (call.video ? " and camera" : "") + " access was blocked.");
-  }
-  call.micOn = true;
-  call.camOn = true;
-  showLocal();
-  await buildPeer();
-  callUI(true, "Connecting…", "", "calling");
   sendCtl({ op: "call", k: "accept" });
+  openVdo();
+}
+
+// ---- VDO.Ninja call (own TURN relay, works on mobile data) ----
+function vdoUrl() {
+  const p = new URLSearchParams();
+  p.set("room", call.room);
+  p.set("password", call.pw);
+  p.set("webcam", "");
+  p.set("autostart", "");
+  p.set("cleanoutput", "");
+  if (!call.video) p.set("videodevice", "0");
+  const t = getTurnConfig();
+  if (t && t.url) p.set("turn", [t.user || "", t.cred || "", t.url].join(";"));
+  return "https://vdo.ninja/?" + p.toString();
+}
+
+async function micCamProbe() {
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return false;
+    const s = await navigator.mediaDevices.getUserMedia({ audio: true, video: call.video });
+    s.getTracks().forEach(t => t.stop());
+    return true;
+  } catch (e) { return false; }
+}
+
+async function openVdo() {
+  closeVdo();
+  const ok = await micCamProbe();
+  if (call.state === "idle") return;          // call ended while checking
+  if (!ok) {
+    const go = await uiConfirm("Camera or mic blocked here",
+      "This screen can't use the microphone or camera. Open the call in your browser (Chrome) instead?",
+      "Open in browser");
+    if (call.state === "idle") return;
+    if (go) { openVdoExternal(); showVdoActive(true); }
+    else endCall("CALL ENDED", true);
+    return;
+  }
+  showVdoActive(false);
+}
+
+function showVdoActive(external) {
+  const cs = $("call-screen");
+  clearTimeout(call.timer);
+  clearTimeout(call.hint);
+  call.state = "active";
+  if (!external) {
+    const f = document.createElement("iframe");
+    f.id = "vdo-frame";
+    f.allow = "camera; microphone; autoplay; fullscreen; display-capture";
+    f.src = vdoUrl();
+    cs.insertBefore(f, cs.firstChild);
+    cs.classList.add("vdo");
+    call.hint = setTimeout(() => { const h = $("vdo-hint"); if (h) h.hidden = false; }, 20000);
+  }
+  callUI(true, external ? "Call is open in your browser" : (call.video ? "Video call" : "Voice call"),
+         external ? "Come back here and tap End when finished" : "", "active");
+  const ext = $("call-ext"); if (ext) ext.hidden = !!external;
+}
+
+function closeVdo() {
+  clearTimeout(call.hint);
+  const f = $("vdo-frame");
+  if (f) { f.src = "about:blank"; f.remove(); }
+  const cs = $("call-screen");
+  if (cs) cs.classList.remove("vdo");
+  const h = $("vdo-hint"); if (h) h.hidden = true;
+  const ext = $("call-ext"); if (ext) ext.hidden = true;
+}
+
+function openVdoExternal() {
+  const u = vdoUrl();
+  copyText(u);                                   // always keep a copy as a last resort
+  if (window.AndroidBridge && typeof window.AndroidBridge.openLink === "function") {
+    window.AndroidBridge.openLink(u);
+  } else {
+    const w = window.open(u, "_blank");
+    if (!w) uiAlert("Link copied", "Open Chrome and paste the link to join the call.");
+  }
+}
+
+function switchToBrowser() {
+  openVdoExternal();
+  closeVdo();
+  showVdoActive(true);
 }
 
 function hangUp() {
@@ -1180,24 +1267,23 @@ async function drainCallIce() {
 async function handleCallSignal(o) {
   try {
     switch (o.k) {
-      case "invite":
+      case "invite": {
         if (call.state !== "idle") { sendCtl({ op: "call", k: "busy" }); return; }
+        const okId = (s) => typeof s === "string" && /^[A-Za-z0-9_-]{6,64}$/.test(s);
+        if (!okId(o.room) || !okId(o.pw)) return;
         call.state = "ringing";
         call.video = !!o.video;
+        call.room = o.room;
+        call.pw = o.pw;
         callUI(true, "Incoming " + (o.video ? "video" : "voice") + " call", "Peer is calling…", "ringing");
         if (navigator.vibrate) navigator.vibrate([300, 200, 300, 200, 300]);
         call.timer = setTimeout(() => { if (call.state === "ringing") endCall("MISSED CALL", true); }, 45000);
         break;
+      }
       case "accept":
         if (call.state !== "calling") return;
         clearTimeout(call.timer);
-        callUI(true, "Connecting…", "", "calling");
-        await buildPeer();
-        {
-          const offer = await call.pc.createOffer();
-          await call.pc.setLocalDescription(offer);
-          sendCtl({ op: "call", k: "sdp", sdp: call.pc.localDescription });
-        }
+        openVdo();
         break;
       case "sdp":
         if (!call.pc) return;
@@ -1228,6 +1314,9 @@ function endCall(reason, notify) {
   if (notify) sendCtl({ op: "call", k: call.state === "ringing" ? "decline" : "end" });
   clearTimeout(call.timer);
   clearInterval(call.tick);
+  closeVdo();
+  call.room = "";
+  call.pw = "";
   if (call.local) call.local.getTracks().forEach(t => t.stop());
   if (call.pc) { try { call.pc.close(); } catch (e) {} }
   const rm = $("remote-media");
@@ -1244,6 +1333,7 @@ function endCall(reason, notify) {
 }
 
 function toggleMic() {
+  if (call.room && call.state === "active") return uiAlert("Use the call screen", "Mute and camera controls are inside the call.");
   if (!call.local) return uiAlert("No active call", "Start a voice or video call first.");
   call.micOn = !call.micOn;
   call.local.getAudioTracks().forEach(t => { t.enabled = call.micOn; });
@@ -1257,6 +1347,7 @@ function toggleCam() {
   refreshCallButtons();
 }
 function toggleSpeaker() {
+  if (call.room && call.state === "active") return uiAlert("Use the call screen", "Volume controls are inside the call.");
   if (call.state === "idle") return uiAlert("No active call", "Start a voice or video call first.");
   const rm = $("remote-media");
   rm.muted = !rm.muted;
@@ -1621,7 +1712,7 @@ function closeDialog() { $("selection-modal").style.display = "none"; }
 
 async function purgeBothScreens() {
   const ok = await uiConfirm("Shred everything?",
-    "This clears the chat on both phones and empties the offline vault. It cannot be undone.",
+    "This clears the chat on both phones and empties the server queue. It cannot be undone.",
     "Shred", true);
   if (!ok) return;
   wipeLocal();
