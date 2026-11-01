@@ -10,4 +10,8 @@
   --accent: #00a884;
   --font-stack: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans Devanagari", "Devanagari MT", Helvetica, Arial, sans-serif;
   --font-size: 15px;
+  /* used by dialogs and call screen (were undefined before) */
+  --text-main: #f3f4f6;
+  --text-dim: #9ca3af;
+  --brand-blue: #2a8bf2;
 }
