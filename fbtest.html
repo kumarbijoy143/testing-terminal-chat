@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Firebase test</title>
+<style>body{font-family:monospace;background:#111;color:#eee;padding:16px}
+button{padding:12px 18px;font-size:16px}pre{white-space:pre-wrap}</style>
+</head><body>
+<button id="go">Run test</button>
+<pre id="out"></pre>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script>
+const cfg = {
+  apiKey: "AIzaSyD9iAj6bEvb9wbwLo_BKmOYYApxJP0Jr8o",
+  authDomain: "calc-notes-test.firebaseapp.com",
+  databaseURL: "https://calc-notes-test-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "calc-notes-test",
+  storageBucket: "calc-notes-test.firebasestorage.app",
+  messagingSenderId: "66213443086",
+  appId: "1:66213443086:web:04de204f27ed7fa8a86e5f"
+};
+const room = "0123456789abcdef0123456789abcdef";
+const out = document.getElementById("out");
+const log = (s) => { out.textContent += s + "\n"; };
+
+async function expectBlocked(label, p) {
+  try { await p; log("UNEXPECTED (allowed): " + label); }
+  catch (e) { log("blocked, good: " + label); }
+}
+
+document.getElementById("go").onclick = async () => {
+  out.textContent = "";
+  try {
+    if (!firebase.apps.length) firebase.initializeApp(cfg);
+    const cred = await firebase.auth().signInAnonymously();
+    const uid = cred.user.uid;
+    log("1. signed in anonymously: " + uid.slice(0, 6) + "...");
+    const db = firebase.database();
+    const r = db.ref("rooms/" + room + "/msgs/t1");
+    await r.set({ c: "hello", f: uid.slice(0, 20) });
+    log("2. write OK");
+    const snap = await r.once("value");
+    log("3. read OK: " + (snap.val() && snap.val().c));
+    await r.remove();
+    log("4. delete OK");
+    await expectBlocked("bad room name", db.ref("rooms/short/msgs/t1").set({ c: "x", f: "y" }));
+    await expectBlocked("write at top level", db.ref("junk").set("x"));
+    await expectBlocked("missing field", db.ref("rooms/" + room + "/msgs/t2").set({ c: "x" }));
+    log("DONE");
+  } catch (e) {
+    log("FAILED: " + (e.code || "") + " " + e.message);
+  }
+};
+</script>
+</body></html>
