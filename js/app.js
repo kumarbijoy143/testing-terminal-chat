@@ -168,6 +168,7 @@ function triggerNativeEmojiKeyboard() { msgInput.focus(); }
 function setActive(v) {
   if (appActive === v) return;
   appActive = v;
+  fbSetActive(v);
   if (v) {
     flushUnread();
     if (passkey) { pingNow(); syncVault(); }
@@ -278,15 +279,7 @@ async function mountSession() {
 
   initRelay();
   syncVault();
-
-  // One-time setup: ask for the key and vault link only if they have never been saved.
-  if (lsGet("setup_done") !== "1") {
-    (async () => {
-      if (!getStoredApiKey()) await configureRelayKey();
-      if (!getStoredVaultUrl()) await configureVaultUrl();
-      lsSet("setup_done", "1");
-    })();
-  }
+  lsSet("setup_done", "1");
 }
 
 // =====================================================================
@@ -621,13 +614,7 @@ async function sendMessage() {
   const bubble = renderBubble(m.text, "you", m.msgId, m.timestamp, m.burn, m.reply);
   pending.set(m.msgId, Date.now());
   sent.set(m.msgId, m);
-  sendCtl({ op: "chat", m });   // instant path when the peer is online
-
-  if (getStoredVaultUrl()) {
-    storeInVault(m);            // safety copy until the peer confirms delivery
-  } else {
-    outbox.push({ m, tries: 0, next: Date.now() + 4000 });
-  }
+  sendCtl({ op: "chat", m }).then(() => markSentToServer(m.msgId)).catch(() => {});
   scrollToBottom(bubble);
 }
 
@@ -815,7 +802,7 @@ function renderBubble(text, role, msgId, timeStr, burnSecs, replyData, fileData)
 
   const textBodyHtml = isImg ? "" : `<span class="msg-text">${linkify(text)}</span>`;
   wrap.dataset.kind = fileData ? "file" : "text";
-  const ticksHtml = role === "you" ? '<span class="ticks">✓</span>' : "";
+  const ticksHtml = role === "you" ? '<span class="ticks">🕓</span>' : "";
 
   wrap.innerHTML = `
     <div class="swipe-reply-icon">
@@ -1638,8 +1625,7 @@ async function purgeBothScreens() {
     "Shred", true);
   if (!ok) return;
   wipeLocal();
-  sendCtl({ op: "purge" });
-  if (getStoredVaultUrl() && passkey) vaultCall({ action: "purge" });
+  fbPurgeQueue().then(() => sendCtl({ op: "purge" }));
   closeSettings();
   logSys("LOCAL & VAULT BUFFERS SHREDDED.");
 }
