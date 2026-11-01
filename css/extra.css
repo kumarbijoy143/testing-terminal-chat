@@ -188,3 +188,55 @@ header { flex-wrap: nowrap; }
   padding: 8px 12px;
 }
 #vdo-hint[hidden] { display: none; }
+
+/* ---------- No text selection anywhere except typing fields ---------- */
+html, body {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+input, textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* ---------- Message selection: top action bar + floating reactions ---------- */
+#select-bar {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 60px;
+  z-index: 70;
+  align-items: center;
+  gap: 2px;
+  padding: 0 8px;
+  background: var(--panel-bg);
+  border-bottom: 1px solid var(--card-border);
+}
+#select-bar .sel-spacer { flex: 1; }
+#select-bar .sel-btn {
+  background: transparent;
+  border: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-main);
+  cursor: pointer;
+}
+#select-bar .sel-btn:active { background: var(--card-bg); }
+#select-bar .sel-btn svg {
+  width: 22px; height: 22px;
+  stroke: currentColor; stroke-width: 2; fill: none;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+#reaction-dock {
+  position: fixed;
+  z-index: 75;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+}
+#reaction-dock .reaction-emoji { font-size: 24px; padding: 2px 4px; }
