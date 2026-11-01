@@ -48,7 +48,6 @@ async function fbInit() {
     peerOnline = online;
     fbRefreshStatus();
     if (online) {
-      if (!was) broadcastConfigSync();
       handlePeerTyping(typing);
     } else {
       typingIndicator.style.display = "none";
