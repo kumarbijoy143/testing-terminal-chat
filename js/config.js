@@ -8,6 +8,16 @@ const STORE_PREFIX = "term_test_";
 
 const PIESOCKET_CLUSTER_ID = "free.blr2";
 
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyD9iAj6bEvb9wbwLo_BKmOYYApxJP0Jr8o",
+  authDomain: "calc-notes-test.firebaseapp.com",
+  databaseURL: "https://calc-notes-test-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "calc-notes-test",
+  storageBucket: "calc-notes-test.firebasestorage.app",
+  messagingSenderId: "66213443086",
+  appId: "1:66213443086:web:04de204f27ed7fa8a86e5f"
+};
+
 const lsGet = (k, d = "") => {
   try { const v = localStorage.getItem(STORE_PREFIX + k); return v === null ? d : v; }
   catch (e) { return d; }
