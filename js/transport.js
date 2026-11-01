@@ -11,6 +11,12 @@ let fbResolve = null;
 const fbReady = new Promise(r => { fbResolve = r; });
 let fbChain = Promise.resolve();
 
+// True while a call or file transfer is running: presence and live signals must keep working
+// even if the screen briefly loses focus (permission pop-ups, the call frame, etc.).
+function fbBusy() {
+  return (typeof call !== "undefined" && call.state !== "idle") || (typeof ft !== "undefined" && !!ft);
+}
+
 async function fbInit() {
   if (fbStarted || !keys) return;
   fbStarted = true;
@@ -64,7 +70,7 @@ async function fbInit() {
 function fbAnnounce() {
   fbPresRef = fbDb.ref(fbRoom + "/pres/" + clientId);
   fbPresRef.onDisconnect().remove();
-  if (appActive) fbPresRef.set({ c: String(Date.now()), f: clientId, ty: false }).catch(() => {});
+  if (appActive || fbBusy()) fbPresRef.set({ c: String(Date.now()), f: clientId, ty: false }).catch(() => {});
   fbRefreshStatus();
 }
 
@@ -76,7 +82,7 @@ function fbRefreshStatus() {
 function fbSetActive(v) {
   if (!fbDb || !fbPresRef) return;
   if (v) fbPresRef.set({ c: String(Date.now()), f: clientId, ty: false }).catch(() => {});
-  else fbPresRef.remove().catch(() => {});
+  else if (!fbBusy()) fbPresRef.remove().catch(() => {});   // stay visible during a call
 }
 
 function fbTyping(on) {
@@ -86,7 +92,8 @@ function fbTyping(on) {
 
 function fbPut(op, c) {
   const durable = !!FB_DURABLE[op];
-  if (!durable && !peerOnline) return Promise.resolve();   // live signals only matter if the peer is here
+  // Live signals only matter if the peer is here (or a call / transfer is already running).
+  if (!durable && !peerOnline && !fbBusy()) return Promise.resolve();
   const payload = { c, f: clientId };
   if (!durable) payload.t = firebase.database.ServerValue.TIMESTAMP;
   return fbReady.then(() => fbDb.ref(fbRoom + (durable ? "/msgs" : "/ctl")).push().set(payload));
