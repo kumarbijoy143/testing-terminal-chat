@@ -201,25 +201,6 @@ window.addEventListener("DOMContentLoaded", () => {
 
 // Adds the extra settings rows, the call screen and the settings entries.
 function injectUi() {
-  const card = $("current-vault-label").closest(".os-card");
-  const mkRow = (iconPath, title, subId, subText, onclick) => {
-    const row = document.createElement("div");
-    row.className = "os-row";
-    row.onclick = onclick;
-    row.innerHTML = `
-      <svg class="row-icon-svg" viewBox="0 0 24 24">${iconPath}</svg>
-      <div class="row-content">
-        <div class="row-title">${title}</div>
-        <div class="row-subtitle" id="${subId}">${subText}</div>
-      </div>
-      <div class="row-arrow">›</div>`;
-    return row;
-  };
-  card.appendChild(mkRow('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
-    "Keep Undelivered Messages", "current-retention-label", "7 days", () => openDialog("retention")));
-  card.appendChild(mkRow('<path d="M5 12h14"/><path d="M12 5l7 7-7 7"/>',
-    "Call Relay (TURN)", "current-turn-label", "Not set", configureTurn));
-
   const cs = document.createElement("div");
   cs.id = "call-screen";
   cs.className = "call-screen";
@@ -925,35 +906,30 @@ function setupBubbleInteractions(wrap, text, role) {
 
 let ctxOpenedAt = 0;
 
-// Long press: highlight the message and show only the reactions plus a ⋮ button.
+// Long press: highlight the message, show a top action bar (Reply / Copy / Edit)
+// and a row of reactions next to it. Nothing is drawn on top of the message text.
 function openClampedContextMenu(bubbleWrap, text, role) {
   hideContext();
-  activeContextTarget = { wrap: bubbleWrap, text, role, id: bubbleWrap.id, menuTop: 0, menuLeft: 0 };
+  activeContextTarget = { wrap: bubbleWrap, text, role, id: bubbleWrap.id };
   bubbleWrap.classList.add("msg-selected");
 
-  const dock = $("reaction-dock");
   const canEdit = role === "you" && bubbleWrap.dataset.kind !== "file";
-  $("context-edit-item").style.display = canEdit ? "flex" : "none";
+  $("select-edit").style.display = canEdit ? "flex" : "none";
+  $("select-bar").style.display = "flex";
 
-  const rect = bubbleWrap.getBoundingClientRect();
-  const streamRect = stream.getBoundingClientRect();
-  const screenWidth = window.innerWidth;
-  const isNearTop = (rect.top - streamRect.top) < 65;
-
-  const dockTop = isNearTop ? (rect.bottom - streamRect.top + 8) : (rect.top - streamRect.top - 46);
-  const dockLeft = role === "you"
-    ? Math.max(12, screenWidth - 300)
-    : Math.min(screenWidth - 300, Math.max(12, rect.left - streamRect.left));
-
-  activeContextTarget.menuTop = isNearTop ? (dockTop + 48) : (rect.bottom - streamRect.top + 6);
-  activeContextTarget.menuLeft = role === "you"
-    ? Math.max(12, screenWidth - 170)
-    : Math.max(12, rect.left - streamRect.left);
-
-  dock.style.top = `${dockTop}px`;
-  dock.style.left = `${dockLeft}px`;
+  const dock = $("reaction-dock");
   dock.style.display = "flex";
-  $("msg-context-menu").style.display = "none";
+  const dockH = dock.offsetHeight || 44;
+  const headerBottom = document.querySelector("header").getBoundingClientRect().bottom;
+  const rect = bubbleWrap.getBoundingClientRect();
+  let top = rect.top - dockH - 8;                          // above the message
+  if (top < headerBottom + 4) top = rect.bottom + 8;       // no room above: put it below
+  const maxTop = window.innerHeight - dockH - 76;          // stay clear of the typing bar
+  if (top > maxTop) top = Math.max(headerBottom + 4, maxTop);
+  dock.style.top = top + "px";
+  if (role === "you") { dock.style.right = "12px"; dock.style.left = "auto"; }
+  else { dock.style.left = "12px"; dock.style.right = "auto"; }
+
   if (navigator.vibrate) navigator.vibrate(15);
 
   ctxOpenedAt = Date.now();
@@ -963,18 +939,9 @@ function openClampedContextMenu(bubbleWrap, text, role) {
   }, 100);
 }
 
-// ⋮ button: show Copy / Reply / Edit under the message.
-function openMoreMenu() {
-  if (!activeContextTarget) return;
-  const menu = $("msg-context-menu");
-  menu.style.top = `${activeContextTarget.menuTop}px`;
-  menu.style.left = `${activeContextTarget.menuLeft}px`;
-  menu.style.display = "flex";
-}
-
 function hideContext() {
   $("reaction-dock").style.display = "none";
-  $("msg-context-menu").style.display = "none";
+  $("select-bar").style.display = "none";
   if (activeContextTarget && activeContextTarget.wrap) activeContextTarget.wrap.classList.remove("msg-selected");
   document.removeEventListener("click", ctxOutside);
   document.removeEventListener("touchstart", ctxOutside);
@@ -982,7 +949,7 @@ function hideContext() {
 
 function ctxOutside(e) {
   if (Date.now() - ctxOpenedAt < 400) return;   // ignore the finger lifting after the long press
-  if (!$("reaction-dock").contains(e.target) && !$("msg-context-menu").contains(e.target)) hideContext();
+  if (!$("reaction-dock").contains(e.target) && !$("select-bar").contains(e.target)) hideContext();
 }
 
 function triggerContextAction(action) {
@@ -1574,8 +1541,11 @@ function setDisappearingDuration(val, label, broadcast) {
 }
 
 function applyRemoteConfig(enabled, duration) {
-  disappearingEnabled = !!enabled;
-  burnDuration = parseInt(duration, 10) || 10;
+  const en = !!enabled;
+  const dur = parseInt(duration, 10) || 10;
+  if (en === disappearingEnabled && dur === burnDuration) return;   // nothing changed: stay silent
+  disappearingEnabled = en;
+  burnDuration = dur;
   lsSet("disappearing", disappearingEnabled);
   lsSet("burn_duration", burnDuration);
   updateDisappearingUI();
