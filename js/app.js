@@ -142,6 +142,7 @@ function resizeInputBox() {
 
 msgInput.addEventListener("input", () => {
   resizeInputBox();
+  updateSendMic();
   if (!channel || !passkey) return;
   const now = Date.now();
   if (now - lastTypingBroadcast > 3000) {
@@ -226,7 +227,8 @@ function injectUi() {
 
 function panicExit() {
   endCall("CALL ENDED", true);
-  ftCleanup();
+  cancelOutgoing();
+  fileIn.clear();
   stream.innerHTML = "";
   outbox = [];
   pending.clear();
@@ -445,7 +447,9 @@ function handleCtl(o) {
       break;
     case "cfg": applyRemoteConfig(o.enabled, o.duration); break;
     case "call": handleCallSignal(o); break;
-    case "ft": handleFileSignal(o); break;
+    case "fmeta":
+    case "fchunk":
+    case "fcancel": handleFileOp(o); break;
   }
 }
 
@@ -698,6 +702,7 @@ function startBurn(node, seconds) {
 }
 
 function wipeLocal() {
+  fileIn.clear();
   stream.innerHTML = "";
   stream.appendChild(typingIndicator);
   outbox = [];
@@ -828,6 +833,13 @@ function renderBubble(text, role, msgId, timeStr, burnSecs, replyData, fileData)
       img.src = fileData.url;
       img.alt = "Image";
       slot.appendChild(img);
+    } else if (/^audio\//.test(fileData.mime || "")) {
+      const au = document.createElement("audio");
+      au.controls = true;
+      au.preload = "metadata";
+      au.className = "voice-note";
+      au.src = fileData.url;
+      slot.appendChild(au);
     } else {
       const a = document.createElement("a");
       a.className = "file-card";
@@ -1322,59 +1334,129 @@ function toggleSpeaker() {
 }
 
 // =====================================================================
-// FILE TRANSFER: direct phone-to-phone over a WebRTC data channel
-// =====================================================================
-let ft = null;
-const FT_MAX = 50 * 1024 * 1024;
+// FILES AND VOICE MESSAGES: sent through Firebase as small encrypted chunks.
+const FILE_MAX = 50 * 1024 * 1024;
+const CHUNK_BYTES = 256 * 1024;            // raw bytes per chunk: small, safe for one database write
+const VOICE_MAX_MS = 5 * 60 * 1000;
+const fileIn = new Map();                   // incoming transfers being collected: t -> state
+const fileCancelled = new Set();            // transfers the other phone cancelled
+let fileOut = null;                         // the transfer this phone is sending
+let voiceRec = null;                        // the voice recording in progress
+let voiceGesture = null;                    // the finger currently holding the mic button
 
-function setProgress(text) {
+function baseMime(m) {
+  const s = String(m || "").split(";")[0].trim();
+  return /^[\w.+-]+\/[\w.+-]+$/.test(s) ? s : "application/octet-stream";
+}
+
+function fmtTime(ms) {
+  const s = Math.floor(ms / 1000);
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+}
+
+function setProgress(text, cancelable) {
   let el = $("ft-progress");
   if (!text) { if (el) el.remove(); return; }
   if (!el) {
     el = document.createElement("div");
     el.id = "ft-progress";
-    el.className = "sys-log";
+    el.className = "sys-log transfer-log";
     stream.insertBefore(el, typingIndicator);
   }
-  el.innerText = text;
+  el.innerHTML = "";
+  const label = document.createElement("span");
+  label.textContent = text;
+  el.appendChild(label);
+  if (cancelable) {
+    const b = document.createElement("button");
+    b.className = "transfer-cancel";
+    b.textContent = "Cancel";
+    b.onclick = cancelOutgoing;
+    el.appendChild(b);
+  }
   scrollToBottom(el);
 }
 
-function ftCleanup() {
-  if (!ft) return;
-  try { if (ft.dc) ft.dc.close(); } catch (e) {}
-  try { if (ft.pc) ft.pc.close(); } catch (e) {}
-  clearTimeout(ft.timer);
-  setProgress(null);
-  ft = null;
+function cancelOutgoing() {
+  if (fileOut) fileOut.cancelled = true;
 }
 
-function ftFail(msg) {
-  const failedId = ft && ft.msgId;
-  ftCleanup();
-  if (failedId) {
-    const t = $(failedId) && $(failedId).querySelector(".ticks");
-    if (t) { t.innerText = "!"; t.style.color = "#ef4444"; }
-    pending.delete(failedId);
+// Photos are shrunk to 1280 px so they send quickly. GIFs are left as they are.
+async function shrinkImage(file) {
+  if (file.type === "image/gif") return file;
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, 1280 / Math.max(bmp.width, bmp.height));
+    const w = Math.round(bmp.width * scale), h = Math.round(bmp.height * scale);
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    c.getContext("2d").drawImage(bmp, 0, 0, w, h);
+    const out = await new Promise(res => c.toBlob(res, "image/jpeg", 0.8));
+    return out && out.size < file.size ? out : file;
+  } catch (e) {
+    return file;
   }
-  logSys("FILE TRANSFER FAILED: " + msg);
 }
 
-function ftNewPeer(t) {
-  const pc = new RTCPeerConnection({ iceServers: getIceServers() });
-  pc.onicecandidate = (e) => { if (e.candidate) sendCtl({ op: "ft", k: "ice", t, c: e.candidate }); };
-  pc.onconnectionstatechange = () => {
-    if (ft && ft.pc === pc && pc.connectionState === "failed") {
-      ftFail("Connection failed. A TURN server may be needed on mobile data.");
+// Sends any blob (photo, document or voice clip) in encrypted chunks.
+async function sendBlob(blob, info) {
+  if (!passkey || !channel) return uiAlert("Not connected", "Enter the passkey and wait for the connection.");
+  if (!peerOnline) return uiAlert("Peer is offline", "Both of you need the app open to send files.");
+  if (fileOut) return uiAlert("Transfer in progress", "Wait for the current file to finish.");
+  if (blob.size > FILE_MAX) return uiAlert("File too large", "The limit is 50 MB.");
+
+  const t = uid();
+  const mime = baseMime(info.mime || blob.type);
+  const total = Math.max(1, Math.ceil(blob.size / CHUNK_BYTES));
+  const url = URL.createObjectURL(blob);
+  const bubbleText = info.kind === "voice" ? "" : info.name;
+  renderBubble(bubbleText, "you", info.msgId, info.timestamp, info.burn, null,
+    { url, name: info.name, mime, size: blob.size });
+  pending.set(info.msgId, Date.now());
+  fileOut = { t, cancelled: false };
+  setProgress("SENDING 0%", true);
+
+  try {
+    await sendCtl({ op: "fmeta", t, msgId: info.msgId, name: info.name, mime,
+      kind: info.kind || "file", size: blob.size, total, timestamp: info.timestamp, burn: info.burn });
+    for (let i = 0; i < total; i++) {
+      if (fileOut.cancelled) break;
+      const part = new Uint8Array(await blob.slice(i * CHUNK_BYTES, (i + 1) * CHUNK_BYTES).arrayBuffer());
+      await sendCtl({ op: "fchunk", t, i, d: b64(part) });
+      setProgress("SENDING " + Math.round((i + 1) / total * 100) + "%", true);
     }
-  };
-  return pc;
+    if (fileOut.cancelled) {
+      await sendCtl({ op: "fcancel", t });
+      pending.delete(info.msgId);
+      const w = $(info.msgId);
+      if (w) w.remove();
+      logSys("FILE CANCELLED.");
+    }
+  } catch (e) {
+    const w = $(info.msgId);
+    const tk = w && w.querySelector(".ticks");
+    if (tk) { tk.innerText = "!"; tk.style.color = "#ef4444"; }
+    pending.delete(info.msgId);
+    logSys("FILE SEND FAILED. TRY AGAIN.");
+  } finally {
+    fileOut = null;
+    setProgress(null);
+  }
 }
 
-async function ftDrain() {
-  while (ft && ft.pc.remoteDescription && ft.ice.length) {
-    try { await ft.pc.addIceCandidate(ft.ice.shift()); } catch (e) {}
-  }
+async function sendFile(file) {
+  if (file.size > FILE_MAX) return uiAlert("File too large", "The limit is 50 MB.");
+  const isImg = /^image\//.test(file.type);
+  const blob = isImg ? await shrinkImage(file) : file;
+  return sendBlob(blob, {
+    msgId: "m_" + uid(),
+    name: String(file.name || "file").slice(0, 120),
+    mime: blob.type || file.type,
+    kind: isImg ? "image" : "file",
+    timestamp: getFormattedTime(),
+    burn: disappearingEnabled ? burnDuration : 0
+  });
 }
 
 function triggerFileSelect() { $("file-picker").click(); }
@@ -1385,129 +1467,153 @@ function handleFileSelected(event) {
   if (f) sendFile(f);
 }
 
-async function sendFile(file) {
-  if (!passkey || !channel) return uiAlert("Not connected", "Enter the passkey and wait for the relay to connect.");
-  if (!peerOnline) return uiAlert("Peer is offline", "Files go directly from phone to phone, so both of you need the app open.");
-  if (ft) return uiAlert("Transfer in progress", "Wait for the current file to finish.");
-  if (file.size > FT_MAX) return uiAlert("File too large", "The limit is 50 MB.");
-
-  const t = uid();
-  const msgId = "m_" + uid();
-  const nowTime = getFormattedTime();
-  const burn = disappearingEnabled ? burnDuration : 0;
-  const url = URL.createObjectURL(file);
-  renderBubble(file.name, "you", msgId, nowTime, burn, null, { url, name: file.name, mime: file.type, size: file.size });
-  pending.set(msgId, Date.now());
-
-  const pc = ftNewPeer(t);
-  const dc = pc.createDataChannel("file", { ordered: true });
-  dc.binaryType = "arraybuffer";
-  ft = {
-    t, pc, dc, msgId, role: "send", ice: [],
-    timer: setTimeout(() => { if (ft && ft.t === t && dc.readyState !== "open") ftFail("Could not connect to peer."); }, 20000)
-  };
-  setProgress("CONNECTING…");
-
-  dc.onopen = async () => {
-    try {
-      dc.send(JSON.stringify({ k: "meta", msgId, name: file.name, mime: file.type, size: file.size, timestamp: nowTime, burn }));
-      dc.bufferedAmountLowThreshold = 512 * 1024;
-      let off = 0;
-      while (off < file.size) {
-        if (!ft || ft.t !== t) return;
-        if (dc.bufferedAmount > 1024 * 1024) {
-          await new Promise(r => dc.addEventListener("bufferedamountlow", r, { once: true }));
-        }
-        const buf = await file.slice(off, off + 16384).arrayBuffer();
-        dc.send(buf);
-        off += buf.byteLength;
-        setProgress("SENDING " + Math.round(off / file.size * 100) + "%");
-      }
-    } catch (e) {
-      ftFail("Send error.");
-    }
-  };
-  dc.onmessage = (e) => {
-    if (e.data === "ok") {
-      markDelivered(msgId, true);
-      ftCleanup();
-    }
-  };
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  sendCtl({ op: "ft", k: "sdp", t, sdp: pc.localDescription });
-}
-
-async function handleFileSignal(o) {
-  try {
-    if (o.k === "sdp" && o.sdp && o.sdp.type === "offer") {
-      if (ft) ftCleanup();
-      const pc = ftNewPeer(o.t);
-      ft = {
-        t: o.t, pc, role: "recv", chunks: [], bytes: 0, meta: null, ice: [],
-        timer: setTimeout(() => { if (ft && ft.t === o.t && !ft.meta) ftFail("Timed out."); }, 25000)
-      };
-      pc.ondatachannel = (e) => {
-        const dc = e.channel;
-        dc.binaryType = "arraybuffer";
-        if (ft && ft.t === o.t) ft.dc = dc;
-        dc.onmessage = (ev) => ftReceive(dc, ev.data);
-      };
-      await pc.setRemoteDescription(o.sdp);
-      await ftDrain();
-      const ans = await pc.createAnswer();
-      await pc.setLocalDescription(ans);
-      sendCtl({ op: "ft", k: "sdp", t: o.t, sdp: pc.localDescription });
-    } else if (o.k === "sdp") {
-      if (ft && ft.t === o.t && ft.role === "send") {
-        await ft.pc.setRemoteDescription(o.sdp);
-        await ftDrain();
-      }
-    } else if (o.k === "ice") {
-      if (!ft || ft.t !== o.t) return;
-      ft.ice.push(o.c);
-      await ftDrain();
-    }
-  } catch (e) {
-    ftFail("Signalling error.");
-  }
-}
-
-function ftReceive(dc, data) {
-  if (!ft) return;
-  if (typeof data === "string") {
-    try {
-      const j = JSON.parse(data);
-      if (j.k === "meta") {
-        const size = Number(j.size);
-        if (!(size > 0 && size <= FT_MAX) || typeof j.msgId !== "string") return ftFail("Invalid file.");
-        ft.meta = j;
-        ft.meta.size = size;
-        setProgress("RECEIVING " + String(j.name || "file").slice(0, 40) + "…");
-      }
-    } catch (e) {}
+// ---- Receiving ----
+function handleFileOp(o) {
+  if (o.op === "fmeta") {
+    const total = Number(o.total), size = Number(o.size);
+    if (fileCancelled.has(o.t) || seenIds.has(o.msgId)) return;
+    if (!(total >= 1 && total <= 4096) || !(size > 0 && size <= FILE_MAX) || typeof o.msgId !== "string") return;
+    fileIn.set(o.t, { meta: o, parts: new Array(total), got: 0, total });
+    setProgress("RECEIVING " + (o.kind === "voice" ? "voice message" : "file") + " 0%", false);
     return;
   }
-  if (!ft.meta) return;
-  ft.chunks.push(data);
-  ft.bytes += data.byteLength;
-  setProgress("RECEIVING " + Math.min(100, Math.round(ft.bytes / ft.meta.size * 100)) + "%");
-  if (ft.bytes >= ft.meta.size) {
-    const m = ft.meta;
-    const mime = /^[\w.+-]+\/[\w.+-]+$/.test(m.mime || "") ? m.mime : "application/octet-stream";
-    const url = URL.createObjectURL(new Blob(ft.chunks, { type: mime }));
-    const tt = ft.t;
-    try { dc.send("ok"); } catch (e) {}
-    setTimeout(() => { if (ft && ft.t === tt) ftCleanup(); }, 1500);
-    if (!seenIds.has(m.msgId)) {
-      seenIds.add(m.msgId);
-      renderBubble(String(m.name || "file").slice(0, 120), "peer", m.msgId, String(m.timestamp || ""),
-        Number(m.burn) || 0, null, { url, name: String(m.name || "file").slice(0, 120), mime, size: m.size });
-      sendCtl({ op: "ack", id: m.msgId });
-      afterPeerBubble(m.msgId);
-    }
+  if (o.op === "fchunk") {
+    const st = fileIn.get(o.t);
+    const i = Number(o.i);
+    if (!st || typeof o.d !== "string" || !(i >= 0 && i < st.total) || st.parts[i]) return;
+    st.parts[i] = unb64(o.d);
+    st.got++;
+    setProgress("RECEIVING " + Math.round(st.got / st.total * 100) + "%", false);
+    if (st.got === st.total) finishIncomingFile(o.t, st);
+    return;
   }
+  if (o.op === "fcancel") {
+    fileIn.delete(o.t);
+    fileCancelled.add(o.t);
+    setProgress(null);
+  }
+}
+
+function finishIncomingFile(t, st) {
+  fileIn.delete(t);
+  setProgress(null);
+  const m = st.meta;
+  if (seenIds.has(m.msgId)) return;
+  seenIds.add(m.msgId);
+  const mime = baseMime(m.mime);
+  const name = String(m.name || "file").slice(0, 120);
+  const url = URL.createObjectURL(new Blob(st.parts, { type: mime }));
+  renderBubble(m.kind === "voice" ? "" : name, "peer", m.msgId, String(m.timestamp || ""),
+    Number(m.burn) || 0, null, { url, name, mime, size: Number(m.size) || 0 });
+  sendCtl({ op: "ack", id: m.msgId });
+  afterPeerBubble(m.msgId);
+}
+
+// ---- Voice messages: hold the mic button to record, release to send ----
+function pickRecorderMime() {
+  if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return "";
+  const list = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
+  return list.find(m => MediaRecorder.isTypeSupported(m)) || "";
+}
+
+function showRecBar(text) {
+  let el = $("rec-bar");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "rec-bar";
+    $("input-bar").parentNode.insertBefore(el, $("input-bar"));
+  }
+  el.textContent = text;
+  el.style.display = "flex";
+}
+
+function hideRecBar() {
+  const el = $("rec-bar");
+  if (el) el.style.display = "none";
+}
+
+function voiceHint(startedAt, cancel) {
+  return "● " + fmtTime(Date.now() - startedAt) + "   " + (cancel ? "Release to cancel" : "← Slide to cancel");
+}
+
+async function startVoiceRecording(g) {
+  if (!passkey || !channel) return uiAlert("Not connected", "Enter the passkey and wait for the connection.");
+  if (!peerOnline) return uiAlert("Peer is offline", "Voice messages are sent when your partner is online.");
+  if (fileOut || voiceRec) return;
+  if (!window.MediaRecorder || !navigator.mediaDevices) {
+    return uiAlert("Not supported", "This phone can't record voice messages in the app.");
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    return uiAlert("Microphone blocked", "Allow microphone access for this app in your phone's settings.");
+  }
+  const mime = pickRecorderMime();
+  const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+  const v = { g, rec, stream, parts: [], startedAt: Date.now(), timer: null, ui: null };
+  rec.ondataavailable = (e) => { if (e.data && e.data.size) v.parts.push(e.data); };
+  voiceRec = v;
+  rec.start(1000);
+  showRecBar(voiceHint(v.startedAt, g.cancel));
+  v.ui = setInterval(() => showRecBar(voiceHint(v.startedAt, g.cancel)), 500);
+  v.timer = setTimeout(() => stopVoiceRecording(true), VOICE_MAX_MS);
+  if (g.released) stopVoiceRecording(!g.cancel);   // finger was lifted while the mic was starting
+}
+
+function stopVoiceRecording(send) {
+  const v = voiceRec;
+  if (!v) return;
+  voiceRec = null;
+  clearInterval(v.ui);
+  clearTimeout(v.timer);
+  hideRecBar();
+  const elapsed = Date.now() - v.startedAt;
+  const stopped = new Promise(res => {
+    if (v.rec.state === "inactive") return res();
+    v.rec.onstop = () => res();
+    v.rec.stop();
+  });
+  stopped.then(() => {
+    v.stream.getTracks().forEach(t => t.stop());
+    if (!send || elapsed < 800) return;          // too short or cancelled: nothing is sent
+    const blob = new Blob(v.parts, { type: v.rec.mimeType || "audio/webm" });
+    if (!blob.size) return;
+    sendBlob(blob, {
+      msgId: "m_" + uid(), name: "Voice message", mime: blob.type, kind: "voice",
+      timestamp: getFormattedTime(), burn: disappearingEnabled ? burnDuration : 0
+    });
+  });
+}
+
+function voiceDown(e) {
+  e.preventDefault();
+  if (voiceGesture) return;
+  if (e.currentTarget.setPointerCapture) e.currentTarget.setPointerCapture(e.pointerId);
+  const g = { x0: e.clientX, cancel: false, released: false };
+  voiceGesture = g;
+  startVoiceRecording(g);
+}
+
+function voiceMove(e) {
+  const g = voiceGesture;
+  if (g) g.cancel = (e.clientX - g.x0) < -80;
+}
+
+function voiceUp() {
+  const g = voiceGesture;
+  if (!g) return;
+  voiceGesture = null;
+  if (voiceRec && voiceRec.g === g) stopVoiceRecording(!g.cancel);
+  else g.released = true;
+}
+
+// Mic button when the box is empty, send button when there is text.
+function updateSendMic() {
+  const hasText = msgInput.value.trim().length > 0;
+  const send = $("send-btn"), mic = $("voice-btn");
+  if (send) send.style.display = hasText ? "flex" : "none";
+  if (mic) mic.style.display = hasText ? "none" : "flex";
 }
 
 // =====================================================================
@@ -1716,3 +1822,10 @@ function setFontSize(sz) {
   const label = $("current-size-label");
   if (label) label.innerText = `${sz}px`;
 }
+
+// ---- Input bar: keep the mic / send button in step with the text box ----
+const _sendMessageBase = sendMessage;
+sendMessage = async function () { await _sendMessageBase(); updateSendMic(); };
+const _startEditBase = startEditMessage;
+startEditMessage = function (id, text) { _startEditBase(id, text); updateSendMic(); };
+updateSendMic();
