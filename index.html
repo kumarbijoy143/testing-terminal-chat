@@ -11,9 +11,9 @@
   <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 
   <!-- Modular Styles -->
-  <link rel="stylesheet" href="css/theme.css?v=4">
-  <link rel="stylesheet" href="css/layout.css?v=4">
-  <link rel="stylesheet" href="css/extra.css?v=4">
+  <link rel="stylesheet" href="css/theme.css?v=5">
+  <link rel="stylesheet" href="css/layout.css?v=5">
+  <link rel="stylesheet" href="css/extra.css?v=5">
 </head>
 <body>
 
@@ -29,23 +29,6 @@
       </div>
     </div>
     <div class="header-actions">
-      <button class="action-btn" id="speaker-toggle-btn" title="Speaker On/Off" onclick="toggleSpeaker()">
-        <svg viewBox="0 0 24 24">
-          <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
-          <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
-          <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
-        </svg>
-      </button>
-
-      <button class="action-btn" id="mic-toggle-btn" title="Mic On/Off" onclick="toggleMic()">
-        <svg viewBox="0 0 24 24">
-          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
-          <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-          <line x1="12" y1="19" x2="12" y2="23"></line>
-          <line x1="8" y1="23" x2="16" y2="23"></line>
-        </svg>
-      </button>
-
       <button class="action-btn" title="Video Call" onclick="triggerCallHandOff(true)">
         <svg viewBox="0 0 24 24">
           <rect x="2" y="5" width="13" height="14" rx="3"></rect>
@@ -139,7 +122,8 @@
       </button>
       <input type="file" id="file-picker" style="display: none;" onchange="handleFileSelected(event)">
     </div>
-    <button class="send-circle-btn" id="send-btn" onpointerdown="event.preventDefault();" onclick="sendMessage()">
+    <button class="voice-btn" id="voice-btn" type="button" onpointerdown="voiceDown(event)" onpointermove="voiceMove(event)" onpointerup="voiceUp()" onpointercancel="voiceUp()" oncontextmenu="return false;" title="Hold to record"><svg viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg></button>
+    <button class="send-circle-btn" id="send-btn" style="display:none" onpointerdown="event.preventDefault();" onclick="sendMessage()">
       <svg viewBox="0 0 24 24">
         <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
       </svg>
@@ -266,9 +250,9 @@
 </div>
 
 <!-- Modular Scripts -->
-<script src="js/config.js?v=4"></script>
-<script src="js/app.js?v=4"></script>
-<script src="js/transport.js?v=4"></script>
+<script src="js/config.js?v=5"></script>
+<script src="js/app.js?v=5"></script>
+<script src="js/transport.js?v=5"></script>
 
 </body>
 </html>
